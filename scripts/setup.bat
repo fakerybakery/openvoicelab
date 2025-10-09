@@ -32,6 +32,14 @@ REM Upgrade pip
 echo Upgrading pip...
 python -m pip install --upgrade pip
 
+REM Install light-the-torch
+echo Installing light-the-torch...
+pip install light-the-torch
+
+REM Install PyTorch with optimal configuration
+echo Installing PyTorch with optimal configuration...
+ltt install torch torchvision torchaudio
+
 REM Install requirements
 echo Installing dependencies...
 pip install -r requirements.txt

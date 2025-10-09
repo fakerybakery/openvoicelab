@@ -30,6 +30,14 @@ source venv/bin/activate
 echo "Upgrading pip..."
 pip install --upgrade pip
 
+# Install light-the-torch
+echo "Installing light-the-torch..."
+pip install light-the-torch
+
+# Install PyTorch with optimal configuration
+echo "Installing PyTorch with optimal configuration..."
+ltt install torch torchvision torchaudio
+
 # Install requirements
 echo "Installing dependencies..."
 pip install -r requirements.txt
