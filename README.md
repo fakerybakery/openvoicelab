@@ -1,4 +1,9 @@
-# OpenVoiceLab
+# OpenVoiceLab (Beta)
+
+[**Join Discord**](https://discord.gg/7C2PPhgtkf)
+
+> [!IMPORTANT]
+> OpenVoiceLab is currently in beta. Some things still need to be improved - especially in the finetuning process. Feedback and contributions are welcome!
 
 A beginner-friendly interface for finetuning and running text-to-speech models. Currently supports VibeVoice.
 
