@@ -3,7 +3,7 @@
 [**Documentation**](https://openvoicelab.github.io/) | [**Join Discord**](https://discord.gg/7C2PPhgtkf)
 
 > [!IMPORTANT]
-> OpenVoiceLab is currently in beta. Some things still need to be improved - especially in the finetuning process. Feedback and contributions are welcome!
+> OpenVoiceLab is currently in beta. Some things still need to be improved - especially in the finetuning process. Windows support is still WIP. Feedback and contributions are welcome!
 
 A beginner-friendly interface for finetuning and running text-to-speech models. Currently supports VibeVoice.
 
@@ -96,6 +96,13 @@ Detailed usage instructions are available in the interface itself.
 **CUDA not available**: Make sure you have NVIDIA drivers and PyTorch with CUDA support installed. The setup scripts should handle this automatically.
 
 **Import errors**: Ensure you've activated the virtual environment before running the CLI.
+
+## Acknowledgements
+
+- [ai-voice-cloning](https://git.ecker.tech/ecker/ai-voice-cloning): This project is heavily inspired by the 2023-era AI Voice Cloning project
+- [VibeVoice](https://github.com/microsoft/VibeVoice): This project is essentially a wrapper for VibeVoice, kudos to the Microsoft team behind VibeVoice
+
+- Thanks to chocoboy for providing initial feedback on Windows
 
 ## License
 
