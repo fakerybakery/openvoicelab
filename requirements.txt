@@ -2,4 +2,7 @@ vibevoice @ git+https://github.com/vibevoice-community/VibeVoice/
 rich
 gradio
 torch
+torchaudio
 click
+tensorboardX
+silero_vad
