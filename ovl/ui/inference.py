@@ -187,6 +187,7 @@ def generate_speech(
         # Parse script to assign speaker IDs (similar to gradio_demo.py lines 277-293)
         lines = script.strip().split("\n")
         formatted_script_lines = []
+        max_speaker_id = -1
 
         for line in lines:
             line = line.strip()
@@ -195,11 +196,24 @@ def generate_speech(
 
             # Check if line already has speaker format (Speaker 0, Speaker 1, etc.)
             if line.startswith("Speaker ") and ":" in line:
+                # Extract speaker ID to validate
+                match = re.match(r"^Speaker\s+(\d+)\s*:", line, re.IGNORECASE)
+                if match:
+                    speaker_id = int(match.group(1))
+                    max_speaker_id = max(max_speaker_id, speaker_id)
                 formatted_script_lines.append(line)
             else:
                 # Auto-assign to speakers in rotation (0-indexed like gradio_demo.py)
                 speaker_id = len(formatted_script_lines) % num_speakers
+                max_speaker_id = max(max_speaker_id, speaker_id)
                 formatted_script_lines.append(f"Speaker {speaker_id}: {line}")
+
+        # Validate that script doesn't use more speakers than configured
+        if max_speaker_id >= num_speakers:
+            raise gr.Error(
+                f"Script uses Speaker {max_speaker_id} but only {num_speakers} speaker(s) configured. "
+                f"Please increase 'Number of Speakers' to at least {max_speaker_id + 1}."
+            )
 
         formatted_script = "\n".join(formatted_script_lines)
 
