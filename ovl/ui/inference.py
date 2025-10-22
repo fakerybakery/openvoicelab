@@ -153,50 +153,10 @@ def get_initial_state():
         )
 
 
-def parse_multi_speaker_text(text):
-    """Parse text to detect multi-speaker format and extract speaker numbers"""
-    import re
-
-    lines = text.strip().split("\n")
-    speaker_pattern = r"^Speaker\s+(\d+):\s*(.*)$"
-
-    scripts = []
-    speaker_numbers = []
-    current_speaker = None
-    current_text = ""
-
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-
-        match = re.match(speaker_pattern, line, re.IGNORECASE)
-        if match:
-            # Save previous speaker's text
-            if current_speaker and current_text:
-                scripts.append(f"Speaker {current_speaker}: {current_text.strip()}")
-                speaker_numbers.append(current_speaker)
-
-            # Start new speaker
-            current_speaker = match.group(1).strip()
-            current_text = match.group(2).strip()
-        else:
-            # Continue text for current speaker
-            if current_text:
-                current_text += " " + line
-            else:
-                current_text = line
-
-    # Save last speaker
-    if current_speaker and current_text:
-        scripts.append(f"Speaker {current_speaker}: {current_text.strip()}")
-        speaker_numbers.append(current_speaker)
-
-    return scripts, speaker_numbers
-
-
-def generate_speech(text, voice_1, voice_2, voice_3, voice_4, cfg_scale, enable_voice_cloning, progress=gr.Progress()):
-    """Generate speech from text"""
+def generate_speech(
+    num_speakers, text, voice_1, voice_2, voice_3, voice_4, cfg_scale, enable_voice_cloning, progress=gr.Progress()
+):
+    """Generate speech from text using gradio_demo.py approach"""
     if model is None:
         return None, "Please load the model first"
 
@@ -204,47 +164,64 @@ def generate_speech(text, voice_1, voice_2, voice_3, voice_4, cfg_scale, enable_
         return None, "Please enter some text"
 
     try:
-        # Parse text to check for multi-speaker format
-        scripts, speaker_numbers = parse_multi_speaker_text(text)
+        import re
+        import librosa
+        import numpy as np
+        import soundfile as sf
 
-        voice_samples = None
-        final_text = text
+        # Validate inputs
+        if num_speakers < 1 or num_speakers > 4:
+            return None, "Error: Number of speakers must be between 1 and 4."
 
-        if enable_voice_cloning:
-            if scripts:
-                # Multi-speaker mode detected
-                unique_speakers = []
-                seen = set()
-                for num in speaker_numbers:
-                    if num not in seen:
-                        unique_speakers.append(num)
-                        seen.add(num)
+        # Collect selected speakers
+        selected_speakers = [voice_1, voice_2, voice_3, voice_4][:num_speakers]
 
-                # Map speaker numbers to voice selections
-                voice_mapping = {"1": voice_1, "2": voice_2, "3": voice_3, "4": voice_4}
+        # Validate speaker selections
+        for i, speaker in enumerate(selected_speakers):
+            if not speaker:
+                return None, f"Error: Please select a valid voice for Speaker {i+1}."
 
-                voice_samples = []
-                for speaker_num in unique_speakers:
-                    voice_name = voice_mapping.get(speaker_num)
-                    if voice_name:
-                        voice_path = voice_mapper.get_voice_path(voice_name)
-                        voice_samples.append(voice_path)
-                    else:
-                        return None, f"Please select a voice for Speaker {speaker_num}"
+        # Defend against common mistake
+        script = text.replace("'", "'")
 
-                # Reconstruct text with proper formatting
-                final_text = "\n".join(scripts)
+        # Parse script to assign speaker IDs (similar to gradio_demo.py lines 277-293)
+        lines = script.strip().split("\n")
+        formatted_script_lines = []
 
-                status_speakers = f"Detected {len(unique_speakers)} speaker(s): {', '.join([f'Speaker {s}' for s in unique_speakers])}"
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            # Check if line already has speaker format (Speaker 0, Speaker 1, etc.)
+            if line.startswith("Speaker ") and ":" in line:
+                formatted_script_lines.append(line)
             else:
-                # Single speaker mode
-                if not voice_1:
-                    return None, "Please select a voice for Speaker 1"
-                voice_path = voice_mapper.get_voice_path(voice_1)
-                voice_samples = [voice_path]
-                status_speakers = "Single speaker mode"
-        else:
-            status_speakers = "Voice cloning disabled"
+                # Auto-assign to speakers in rotation (0-indexed like gradio_demo.py)
+                speaker_id = len(formatted_script_lines) % num_speakers
+                formatted_script_lines.append(f"Speaker {speaker_id}: {line}")
+
+        formatted_script = "\n".join(formatted_script_lines)
+
+        # Load voice samples when voice cloning is enabled (similar to gradio_demo.py lines 257-267)
+        voice_samples = None
+        if enable_voice_cloning:
+            voice_samples = []
+            for speaker_name in selected_speakers:
+                audio_path = voice_mapper.get_voice_path(speaker_name)
+                # Read audio with same preprocessing as gradio_demo.py
+                wav, sr = sf.read(audio_path)
+                if len(wav.shape) > 1:
+                    wav = np.mean(wav, axis=1)
+                if sr != 24000:
+                    wav = librosa.resample(wav, orig_sr=sr, target_sr=24000)
+                voice_samples.append(wav)
+
+        status_speakers = (
+            f"Using {num_speakers} speaker(s): {', '.join(selected_speakers)}"
+            if enable_voice_cloning
+            else "Voice cloning disabled"
+        )
 
         # Generate output path
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -258,9 +235,9 @@ def generate_speech(text, voice_1, voice_2, voice_3, voice_4, cfg_scale, enable_
                 # Only pass supported arguments to Gradio's tqdm
                 return progress.tqdm(iterable, desc=desc)
 
-        # Generate
+        # Generate using the same approach as gradio_demo.py
         result = model.generate(
-            text=final_text,
+            text=formatted_script,
             voice_samples=voice_samples,
             output_path=output_path,
             cfg_scale=cfg_scale,
@@ -285,6 +262,14 @@ RTF: {result.rtf:.2f}x"""
 def toggle_voice_selection(enable_cloning):
     """Show/hide voice selection based on voice cloning checkbox"""
     return gr.update(visible=enable_cloning)
+
+
+def update_speaker_visibility(num_speakers):
+    """Show/hide speaker dropdowns based on number of speakers"""
+    updates = []
+    for i in range(4):
+        updates.append(gr.update(visible=(i < num_speakers)))
+    return updates
 
 
 def refresh_voices():
@@ -327,37 +312,51 @@ with gr.Blocks() as inference_tab:
 
         with gr.Column(scale=2):
             gr.Markdown("### Generate Speech")
+
+            # Number of speakers slider
+            num_speakers = gr.Slider(
+                minimum=1,
+                maximum=4,
+                value=1,
+                step=1,
+                label="Number of Speakers",
+            )
+
             text_input = gr.Textbox(
                 label="Text",
-                placeholder="Enter text to synthesize...\n\nFor multi-speaker:\nSpeaker 1: Hello there!\nSpeaker 2: Hi! How are you?",
+                placeholder="Enter text to synthesize...\n\nFor multi-speaker:\nSpeaker 0: Hello there!\nSpeaker 1: Hi! How are you?\n\nOr enter plain text and speakers will be auto-assigned.",
                 lines=8,
             )
 
             enable_cloning = gr.Checkbox(label="Enable Voice Cloning", value=True)
 
             with gr.Column(visible=True) as voice_row:
-                gr.Markdown("**Voice Selection** (for multi-speaker, use format: `Speaker 1: text`, `Speaker 2: text`, etc.)")
+                gr.Markdown("**Voice Selection** (Speaker 0, Speaker 1, Speaker 2, Speaker 3)")
                 with gr.Row():
                     voice_dropdown_1 = gr.Dropdown(
-                        label="Speaker 1",
+                        label="Speaker 0",
                         choices=voice_mapper.list_voices(),
                         value=(voice_mapper.list_voices()[0] if voice_mapper.list_voices() else None),
+                        visible=True,
                     )
                     voice_dropdown_2 = gr.Dropdown(
-                        label="Speaker 2",
+                        label="Speaker 1",
                         choices=voice_mapper.list_voices(),
                         value=(voice_mapper.list_voices()[1] if len(voice_mapper.list_voices()) > 1 else None),
+                        visible=False,
                     )
                 with gr.Row():
                     voice_dropdown_3 = gr.Dropdown(
-                        label="Speaker 3",
+                        label="Speaker 2",
                         choices=voice_mapper.list_voices(),
                         value=(voice_mapper.list_voices()[2] if len(voice_mapper.list_voices()) > 2 else None),
+                        visible=False,
                     )
                     voice_dropdown_4 = gr.Dropdown(
-                        label="Speaker 4",
+                        label="Speaker 3",
                         choices=voice_mapper.list_voices(),
                         value=(voice_mapper.list_voices()[3] if len(voice_mapper.list_voices()) > 3 else None),
+                        visible=False,
                     )
                 refresh_btn = gr.Button("🔄 Refresh Voices", size="sm")
 
@@ -383,9 +382,25 @@ with gr.Blocks() as inference_tab:
         ],
     )
 
+    # Update speaker visibility when num_speakers changes
+    num_speakers.change(
+        fn=update_speaker_visibility,
+        inputs=[num_speakers],
+        outputs=[voice_dropdown_1, voice_dropdown_2, voice_dropdown_3, voice_dropdown_4],
+    )
+
     generate_btn.click(
         fn=generate_speech,
-        inputs=[text_input, voice_dropdown_1, voice_dropdown_2, voice_dropdown_3, voice_dropdown_4, cfg_scale, enable_cloning],
+        inputs=[
+            num_speakers,
+            text_input,
+            voice_dropdown_1,
+            voice_dropdown_2,
+            voice_dropdown_3,
+            voice_dropdown_4,
+            cfg_scale,
+            enable_cloning,
+        ],
         outputs=[output_audio, generation_status],
     )
 

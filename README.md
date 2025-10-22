@@ -97,25 +97,36 @@ Simply enter your text in the text box and select a voice for Speaker 1. The mod
 
 ### Multi-Speaker Inference (Up to 4 Speakers)
 
-OpenVoiceLab supports multi-speaker conversations with up to 4 distinct voices. Format your text using the following pattern:
+OpenVoiceLab supports multi-speaker conversations with up to 4 distinct voices. The implementation follows the VibeVoice gradio_demo.py approach with 0-indexed speakers.
 
+**Two ways to use multi-speaker:**
+
+1. **Format your text with speaker labels** (0-indexed):
 ```
-Speaker 1: Hello there! How are you doing today?
-Speaker 2: I'm doing great, thanks for asking!
-Speaker 1: That's wonderful to hear.
-Speaker 3: Hey everyone, mind if I join the conversation?
-Speaker 4: Of course not! The more the merrier.
+Speaker 0: Hello there! How are you doing today?
+Speaker 1: I'm doing great, thanks for asking!
+Speaker 0: That's wonderful to hear.
+Speaker 2: Hey everyone, mind if I join the conversation?
+Speaker 3: Of course not! The more the merrier.
+```
+
+2. **Enter plain text** and speakers will be auto-assigned in rotation:
+```
+Hello there! How are you doing today?
+I'm doing great, thanks for asking!
+That's wonderful to hear.
 ```
 
 **Instructions:**
-1. In the Inference tab, select voices for each speaker (Speaker 1, Speaker 2, Speaker 3, Speaker 4)
-2. Format your text using `Speaker X:` followed by the text for that speaker
-3. The model will automatically detect the number of speakers and assign the appropriate voices
-4. You can use up to 4 different speakers in a single conversation
+1. Set the "Number of Speakers" slider (1-4)
+2. Select a voice for each speaker (Speaker 0, Speaker 1, Speaker 2, Speaker 3)
+3. Enter your text (with or without `Speaker X:` labels)
+4. If you don't use speaker labels, text will be auto-assigned to speakers in rotation
 
 **Tips:**
-- Make sure to select a voice for each speaker number you use in your text
-- If you only use 2 speakers, you only need to select voices for Speaker 1 and Speaker 2
+- Speakers are 0-indexed: Speaker 0, Speaker 1, Speaker 2, Speaker 3 (matching VibeVoice's format)
+- Only the number of speakers you select will be shown in the UI
+- Voice samples are passed to the model in the same order as selected
 - The voices are stored in the `voices/` folder - you can add your own reference audio files there
 - Example scripts are available in the `examples/` folder:
   - `multi_speaker_example.txt` - A 2-speaker conversation
