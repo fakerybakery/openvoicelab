@@ -136,6 +136,10 @@ Speaker 4: Of course not! The more the merrier.
 
 - Thanks to chocoboy for providing initial feedback on Windows
 
+## Roadmap
+
+- Support for auto-updating OpenVoiceLab GUI
+
 ## License
 
 OpenVoiceLab is licensed under the BSD-3-Clause license. See the [LICENSE](LICENSE) file for details.
