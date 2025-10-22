@@ -317,7 +317,7 @@ with gr.Blocks() as inference_tab:
             num_speakers = gr.Slider(
                 minimum=1,
                 maximum=4,
-                value=1,
+                value=2,
                 step=1,
                 label="Number of Speakers",
             )
@@ -343,7 +343,7 @@ with gr.Blocks() as inference_tab:
                         label="Speaker 1",
                         choices=voice_mapper.list_voices(),
                         value=(voice_mapper.list_voices()[1] if len(voice_mapper.list_voices()) > 1 else None),
-                        visible=False,
+                        visible=True,
                     )
                 with gr.Row():
                     voice_dropdown_3 = gr.Dropdown(
