@@ -153,7 +153,49 @@ def get_initial_state():
         )
 
 
-def generate_speech(text, voice_name, cfg_scale, enable_voice_cloning, progress=gr.Progress()):
+def parse_multi_speaker_text(text):
+    """Parse text to detect multi-speaker format and extract speaker numbers"""
+    import re
+
+    lines = text.strip().split("\n")
+    speaker_pattern = r"^Speaker\s+(\d+):\s*(.*)$"
+
+    scripts = []
+    speaker_numbers = []
+    current_speaker = None
+    current_text = ""
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        match = re.match(speaker_pattern, line, re.IGNORECASE)
+        if match:
+            # Save previous speaker's text
+            if current_speaker and current_text:
+                scripts.append(f"Speaker {current_speaker}: {current_text.strip()}")
+                speaker_numbers.append(current_speaker)
+
+            # Start new speaker
+            current_speaker = match.group(1).strip()
+            current_text = match.group(2).strip()
+        else:
+            # Continue text for current speaker
+            if current_text:
+                current_text += " " + line
+            else:
+                current_text = line
+
+    # Save last speaker
+    if current_speaker and current_text:
+        scripts.append(f"Speaker {current_speaker}: {current_text.strip()}")
+        speaker_numbers.append(current_speaker)
+
+    return scripts, speaker_numbers
+
+
+def generate_speech(text, voice_1, voice_2, voice_3, voice_4, cfg_scale, enable_voice_cloning, progress=gr.Progress()):
     """Generate speech from text"""
     if model is None:
         return None, "Please load the model first"
@@ -161,15 +203,48 @@ def generate_speech(text, voice_name, cfg_scale, enable_voice_cloning, progress=
     if not text or text.strip() == "":
         return None, "Please enter some text"
 
-    if enable_voice_cloning and not voice_name:
-        return None, "Please select a voice"
-
     try:
-        # Get voice path only if voice cloning is enabled
+        # Parse text to check for multi-speaker format
+        scripts, speaker_numbers = parse_multi_speaker_text(text)
+
         voice_samples = None
+        final_text = text
+
         if enable_voice_cloning:
-            voice_path = voice_mapper.get_voice_path(voice_name)
-            voice_samples = [voice_path]
+            if scripts:
+                # Multi-speaker mode detected
+                unique_speakers = []
+                seen = set()
+                for num in speaker_numbers:
+                    if num not in seen:
+                        unique_speakers.append(num)
+                        seen.add(num)
+
+                # Map speaker numbers to voice selections
+                voice_mapping = {"1": voice_1, "2": voice_2, "3": voice_3, "4": voice_4}
+
+                voice_samples = []
+                for speaker_num in unique_speakers:
+                    voice_name = voice_mapping.get(speaker_num)
+                    if voice_name:
+                        voice_path = voice_mapper.get_voice_path(voice_name)
+                        voice_samples.append(voice_path)
+                    else:
+                        return None, f"Please select a voice for Speaker {speaker_num}"
+
+                # Reconstruct text with proper formatting
+                final_text = "\n".join(scripts)
+
+                status_speakers = f"Detected {len(unique_speakers)} speaker(s): {', '.join([f'Speaker {s}' for s in unique_speakers])}"
+            else:
+                # Single speaker mode
+                if not voice_1:
+                    return None, "Please select a voice for Speaker 1"
+                voice_path = voice_mapper.get_voice_path(voice_1)
+                voice_samples = [voice_path]
+                status_speakers = "Single speaker mode"
+        else:
+            status_speakers = "Voice cloning disabled"
 
         # Generate output path
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -185,7 +260,7 @@ def generate_speech(text, voice_name, cfg_scale, enable_voice_cloning, progress=
 
         # Generate
         result = model.generate(
-            text=text,
+            text=final_text,
             voice_samples=voice_samples,
             output_path=output_path,
             cfg_scale=cfg_scale,
@@ -194,6 +269,7 @@ def generate_speech(text, voice_name, cfg_scale, enable_voice_cloning, progress=
         )
 
         status = f"""✓ Generated successfully
+{status_speakers}
 Duration: {result.audio_duration:.2f}s
 Generation time: {result.generation_time:.2f}s
 RTF: {result.rtf:.2f}x"""
@@ -201,7 +277,9 @@ RTF: {result.rtf:.2f}x"""
         return result.audio_path, status
 
     except Exception as e:
-        return None, f"✗ Error: {str(e)}"
+        import traceback
+
+        return None, f"✗ Error: {str(e)}\n{traceback.format_exc()}"
 
 
 def toggle_voice_selection(enable_cloning):
@@ -213,7 +291,12 @@ def refresh_voices():
     """Refresh voice list"""
     voice_mapper.refresh()
     voices = voice_mapper.list_voices()
-    return gr.update(choices=voices, value=voices[0] if voices else None)
+    return (
+        gr.update(choices=voices, value=voices[0] if voices else None),
+        gr.update(choices=voices, value=voices[1] if len(voices) > 1 else None),
+        gr.update(choices=voices, value=voices[2] if len(voices) > 2 else None),
+        gr.update(choices=voices, value=voices[3] if len(voices) > 3 else None),
+    )
 
 
 with gr.Blocks() as inference_tab:
@@ -244,17 +327,39 @@ with gr.Blocks() as inference_tab:
 
         with gr.Column(scale=2):
             gr.Markdown("### Generate Speech")
-            text_input = gr.Textbox(label="Text", placeholder="Enter text to synthesize...", lines=5)
+            text_input = gr.Textbox(
+                label="Text",
+                placeholder="Enter text to synthesize...\n\nFor multi-speaker:\nSpeaker 1: Hello there!\nSpeaker 2: Hi! How are you?",
+                lines=8,
+            )
 
             enable_cloning = gr.Checkbox(label="Enable Voice Cloning", value=True)
 
-            with gr.Row(visible=True) as voice_row:
-                voice_dropdown = gr.Dropdown(
-                    label="Voice",
-                    choices=voice_mapper.list_voices(),
-                    value=(voice_mapper.list_voices()[0] if voice_mapper.list_voices() else None),
-                )
-                refresh_btn = gr.Button("🔄", scale=0)
+            with gr.Column(visible=True) as voice_row:
+                gr.Markdown("**Voice Selection** (for multi-speaker, use format: `Speaker 1: text`, `Speaker 2: text`, etc.)")
+                with gr.Row():
+                    voice_dropdown_1 = gr.Dropdown(
+                        label="Speaker 1",
+                        choices=voice_mapper.list_voices(),
+                        value=(voice_mapper.list_voices()[0] if voice_mapper.list_voices() else None),
+                    )
+                    voice_dropdown_2 = gr.Dropdown(
+                        label="Speaker 2",
+                        choices=voice_mapper.list_voices(),
+                        value=(voice_mapper.list_voices()[1] if len(voice_mapper.list_voices()) > 1 else None),
+                    )
+                with gr.Row():
+                    voice_dropdown_3 = gr.Dropdown(
+                        label="Speaker 3",
+                        choices=voice_mapper.list_voices(),
+                        value=(voice_mapper.list_voices()[2] if len(voice_mapper.list_voices()) > 2 else None),
+                    )
+                    voice_dropdown_4 = gr.Dropdown(
+                        label="Speaker 4",
+                        choices=voice_mapper.list_voices(),
+                        value=(voice_mapper.list_voices()[3] if len(voice_mapper.list_voices()) > 3 else None),
+                    )
+                refresh_btn = gr.Button("🔄 Refresh Voices", size="sm")
 
             cfg_scale = gr.Slider(label="CFG Scale", minimum=1.0, maximum=2.0, value=1.3, step=0.1)
 
@@ -280,11 +385,15 @@ with gr.Blocks() as inference_tab:
 
     generate_btn.click(
         fn=generate_speech,
-        inputs=[text_input, voice_dropdown, cfg_scale, enable_cloning],
+        inputs=[text_input, voice_dropdown_1, voice_dropdown_2, voice_dropdown_3, voice_dropdown_4, cfg_scale, enable_cloning],
         outputs=[output_audio, generation_status],
     )
 
-    refresh_btn.click(fn=refresh_voices, inputs=[], outputs=[voice_dropdown])
+    refresh_btn.click(
+        fn=refresh_voices,
+        inputs=[],
+        outputs=[voice_dropdown_1, voice_dropdown_2, voice_dropdown_3, voice_dropdown_4],
+    )
 
     enable_cloning.change(fn=toggle_voice_selection, inputs=[enable_cloning], outputs=[voice_row])
 

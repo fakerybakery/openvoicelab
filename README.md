@@ -89,6 +89,38 @@ Once you have OpenVoiceLab running, you can:
 
 Detailed usage instructions are available in the interface itself.
 
+## Usage
+
+### Single Speaker Inference
+
+Simply enter your text in the text box and select a voice for Speaker 1. The model will generate speech in that voice.
+
+### Multi-Speaker Inference (Up to 4 Speakers)
+
+OpenVoiceLab supports multi-speaker conversations with up to 4 distinct voices. Format your text using the following pattern:
+
+```
+Speaker 1: Hello there! How are you doing today?
+Speaker 2: I'm doing great, thanks for asking!
+Speaker 1: That's wonderful to hear.
+Speaker 3: Hey everyone, mind if I join the conversation?
+Speaker 4: Of course not! The more the merrier.
+```
+
+**Instructions:**
+1. In the Inference tab, select voices for each speaker (Speaker 1, Speaker 2, Speaker 3, Speaker 4)
+2. Format your text using `Speaker X:` followed by the text for that speaker
+3. The model will automatically detect the number of speakers and assign the appropriate voices
+4. You can use up to 4 different speakers in a single conversation
+
+**Tips:**
+- Make sure to select a voice for each speaker number you use in your text
+- If you only use 2 speakers, you only need to select voices for Speaker 1 and Speaker 2
+- The voices are stored in the `voices/` folder - you can add your own reference audio files there
+- Example scripts are available in the `examples/` folder:
+  - `multi_speaker_example.txt` - A 2-speaker conversation
+  - `four_speaker_example.txt` - A 4-speaker discussion
+
 ## Troubleshooting
 
 **Out of memory errors during training**: Try reducing the batch size or using a smaller model variant.
