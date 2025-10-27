@@ -187,8 +187,9 @@ def generate_speech(
         # Parse script to assign speaker IDs (similar to gradio_demo.py lines 277-293)
         lines = script.strip().split("\n")
         formatted_script_lines = []
-        max_speaker_id = -1
+        speaker_ids_used = set()
 
+        # First pass: collect all speaker IDs used in the script
         for line in lines:
             line = line.strip()
             if not line:
@@ -196,24 +197,46 @@ def generate_speech(
 
             # Check if line already has speaker format (Speaker 0, Speaker 1, etc.)
             if line.startswith("Speaker ") and ":" in line:
-                # Extract speaker ID to validate
                 match = re.match(r"^Speaker\s+(\d+)\s*:", line, re.IGNORECASE)
                 if match:
                     speaker_id = int(match.group(1))
-                    max_speaker_id = max(max_speaker_id, speaker_id)
-                formatted_script_lines.append(line)
+                    speaker_ids_used.add(speaker_id)
+
+        # Create a mapping to re-index speakers to start at 0
+        if speaker_ids_used:
+            sorted_speakers = sorted(speaker_ids_used)
+            speaker_id_mapping = {old_id: new_id for new_id, old_id in enumerate(sorted_speakers)}
+
+            # Validate that we don't have more unique speakers than configured
+            if len(sorted_speakers) > num_speakers:
+                raise gr.Error(
+                    f"Script uses {len(sorted_speakers)} unique speakers ({', '.join(f'Speaker {s}' for s in sorted_speakers)}) "
+                    f"but only {num_speakers} speaker(s) configured. "
+                    f"Please increase 'Number of Speakers' to at least {len(sorted_speakers)}."
+                )
+        else:
+            speaker_id_mapping = {}
+
+        # Second pass: reformat with re-indexed speaker IDs
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            # Check if line already has speaker format (Speaker 0, Speaker 1, etc.)
+            if line.startswith("Speaker ") and ":" in line:
+                match = re.match(r"^Speaker\s+(\d+)\s*:\s*(.*)$", line, re.IGNORECASE)
+                if match:
+                    old_speaker_id = int(match.group(1))
+                    text_content = match.group(2)
+                    new_speaker_id = speaker_id_mapping.get(old_speaker_id, old_speaker_id)
+                    formatted_script_lines.append(f"Speaker {new_speaker_id}: {text_content}")
+                else:
+                    formatted_script_lines.append(line)
             else:
                 # Auto-assign to speakers in rotation (0-indexed like gradio_demo.py)
                 speaker_id = len(formatted_script_lines) % num_speakers
-                max_speaker_id = max(max_speaker_id, speaker_id)
                 formatted_script_lines.append(f"Speaker {speaker_id}: {line}")
-
-        # Validate that script doesn't use more speakers than configured
-        if max_speaker_id >= num_speakers:
-            raise gr.Error(
-                f"Script uses Speaker {max_speaker_id} but only {num_speakers} speaker(s) configured. "
-                f"Please increase 'Number of Speakers' to at least {max_speaker_id + 1}."
-            )
 
         formatted_script = "\n".join(formatted_script_lines)
 

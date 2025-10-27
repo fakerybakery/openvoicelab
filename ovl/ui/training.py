@@ -44,6 +44,7 @@ def start_training(
     batch_size,
     learning_rate,
     lora_r,
+    voice_prompt_drop_rate,
     progress=gr.Progress(),
 ):
     """Start training"""
@@ -66,6 +67,7 @@ def start_training(
         batch_size=batch_size,
         learning_rate=learning_rate,
         lora_r=lora_r,
+        voice_prompt_drop_rate=voice_prompt_drop_rate,
     )
 
     try:
@@ -142,6 +144,15 @@ with gr.Blocks() as training_tab:
 
                 lora_r = gr.Slider(label="LoRA Rank (r)", minimum=4, maximum=64, value=8, step=4)
 
+                voice_prompt_drop_rate = gr.Slider(
+                    label="Voice Prompt Drop Rate",
+                    minimum=0.0,
+                    maximum=1.0,
+                    value=0.2,
+                    step=0.1,
+                    info="Default 0.2 for multi-speaker. Use 1.0 for single-speaker (disables voice cloning but improves naturalness)",
+                )
+
             with gr.Row():
                 start_btn = gr.Button("▶️ Start Training", variant="primary", size="lg")
                 stop_btn = gr.Button("⏹️ Stop Training", variant="stop", size="lg")
@@ -177,6 +188,7 @@ with gr.Blocks() as training_tab:
             batch_size,
             learning_rate,
             lora_r,
+            voice_prompt_drop_rate,
         ],
         outputs=[status_text, tensorboard_html, runs_list],
     )

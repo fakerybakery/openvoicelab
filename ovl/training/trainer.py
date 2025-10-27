@@ -36,6 +36,7 @@ class TrainingConfig:
     logging_steps: int = 10
     eval_steps: int = 500
     warmup_steps: int = 100
+    voice_prompt_drop_rate: float = 0.2
 
 
 class TrainingManager:
@@ -131,6 +132,7 @@ class TrainingManager:
                 "learning_rate": config.learning_rate,
                 "lora_r": config.lora_r,
                 "lora_alpha": config.lora_alpha,
+                "voice_prompt_drop_rate": config.voice_prompt_drop_rate,
             },
         }
         (run_dir / "info.json").write_text(json.dumps(info, indent=2))
@@ -182,6 +184,8 @@ class TrainingManager:
             str(config.logging_steps),
             "--warmup_steps",
             str(config.warmup_steps),
+            "--voice_prompt_drop_rate",
+            str(config.voice_prompt_drop_rate),
             "--logging_dir",
             str(run_dir / "logs"),
             "--report_to",
