@@ -6,3 +6,5 @@ torchaudio
 click
 tensorboardX
 silero_vad
+librosa
+soundfile
