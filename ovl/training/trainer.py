@@ -48,6 +48,11 @@ class TrainingConfig:
     warmup_ratio: float = 0.03
     max_grad_norm: float = 0.8
     gradient_accumulation_steps: int = 1
+    # DeepSpeed configuration
+    use_deepspeed: bool = False
+    deepspeed_stage: int = 2  # ZeRO stage: 1, 2, or 3
+    deepspeed_offload_optimizer: bool = False
+    deepspeed_offload_params: bool = False
 
 
 class TrainingManager:
@@ -59,6 +64,62 @@ class TrainingManager:
         self.state_file = self.runs_dir / "state.json"
         self.tensorboard_process = None
         self.training_process = None
+
+    def _get_num_gpus(self) -> int:
+        """Get number of available GPUs"""
+        import torch
+        if torch.cuda.is_available():
+            return torch.cuda.device_count()
+        return 1
+
+    def _create_deepspeed_config(self, config: TrainingConfig, output_path: Path) -> None:
+        """Create DeepSpeed configuration file optimized for LoRA training"""
+        deepspeed_config = {
+            "train_batch_size": "auto",
+            "train_micro_batch_size_per_gpu": "auto",
+            "gradient_accumulation_steps": "auto",
+            "gradient_clipping": config.max_grad_norm,
+            "fp16": {
+                "enabled": False
+            },
+            "bf16": {
+                "enabled": config.bf16
+            },
+            "zero_optimization": {
+                "stage": config.deepspeed_stage,
+                "offload_optimizer": {
+                    "device": "cpu" if config.deepspeed_offload_optimizer else "none",
+                    "pin_memory": True
+                },
+                "offload_param": {
+                    "device": "cpu" if config.deepspeed_offload_params else "none",
+                    "pin_memory": True
+                },
+                "overlap_comm": True,
+                "contiguous_gradients": True,
+                "reduce_bucket_size": "auto",
+                "stage3_prefetch_bucket_size": "auto",
+                "stage3_param_persistence_threshold": "auto",
+                "sub_group_size": 1e9,
+                "stage3_max_live_parameters": 1e9,
+                "stage3_max_reuse_distance": 1e9,
+                "stage3_gather_16bit_weights_on_model_save": True
+            },
+            "scheduler": {
+                "type": "WarmupDecayLR",
+                "params": {
+                    "warmup_min_lr": 0,
+                    "warmup_max_lr": config.learning_rate,
+                    "warmup_num_steps": config.warmup_steps,
+                    "total_num_steps": "auto"
+                }
+            },
+            "steps_per_print": config.logging_steps,
+            "wall_clock_breakdown": False
+        }
+
+        output_path.write_text(json.dumps(deepspeed_config, indent=2))
+        logger.info(f"Created DeepSpeed config at {output_path}")
 
     def _load_state(self) -> Dict[str, Any]:
         """Load training state"""
@@ -160,11 +221,32 @@ class TrainingManager:
             logger.error(f"Failed to prepare training data: {e}")
             raise ValueError(f"Failed to prepare training data: {e}")
 
+        # Create DeepSpeed config if enabled
+        deepspeed_config_path = None
+        if config.use_deepspeed:
+            deepspeed_config_path = run_dir / "deepspeed_config.json"
+            self._create_deepspeed_config(config, deepspeed_config_path)
+            logger.info(f"DeepSpeed enabled with ZeRO stage {config.deepspeed_stage}")
+
         # Build command
         train_script = Path(__file__).parent / "train_script.py"
-        cmd = [
-            sys.executable,
-            str(train_script),
+
+        # Use deepspeed launcher if enabled
+        if config.use_deepspeed:
+            cmd = [
+                "deepspeed",
+                "--num_gpus", str(self._get_num_gpus()),
+                str(train_script),
+                "--deepspeed", str(deepspeed_config_path),
+            ]
+        else:
+            cmd = [
+                sys.executable,
+                str(train_script),
+            ]
+
+        # Add common training arguments
+        cmd.extend([
             "--model_name_or_path",
             config.model_path,
             "--dataset_name",

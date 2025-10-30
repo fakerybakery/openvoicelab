@@ -45,6 +45,10 @@ def start_training(
     learning_rate,
     lora_r,
     voice_prompt_drop_rate,
+    use_deepspeed,
+    deepspeed_stage,
+    deepspeed_offload_optimizer,
+    deepspeed_offload_params,
     progress=gr.Progress(),
 ):
     """Start training"""
@@ -68,6 +72,10 @@ def start_training(
         learning_rate=learning_rate,
         lora_r=lora_r,
         voice_prompt_drop_rate=voice_prompt_drop_rate,
+        use_deepspeed=use_deepspeed,
+        deepspeed_stage=int(deepspeed_stage),
+        deepspeed_offload_optimizer=deepspeed_offload_optimizer,
+        deepspeed_offload_params=deepspeed_offload_params,
     )
 
     try:
@@ -155,6 +163,32 @@ with gr.Blocks() as training_tab:
                     info="Default 0.2 for multi-speaker. Use 1.0 for single-speaker (disables voice cloning but improves naturalness)",
                 )
 
+            with gr.Accordion("Multi-GPU (DeepSpeed)", open=False):
+                use_deepspeed = gr.Checkbox(
+                    label="Enable DeepSpeed",
+                    value=False,
+                    info="Use DeepSpeed for multi-GPU training (requires CUDA GPUs)"
+                )
+
+                deepspeed_stage = gr.Radio(
+                    label="ZeRO Stage",
+                    choices=["1", "2", "3"],
+                    value="2",
+                    info="Stage 2 recommended for LoRA. Stage 3 for very large models."
+                )
+
+                deepspeed_offload_optimizer = gr.Checkbox(
+                    label="Offload Optimizer to CPU",
+                    value=False,
+                    info="Save GPU memory by offloading optimizer states to CPU"
+                )
+
+                deepspeed_offload_params = gr.Checkbox(
+                    label="Offload Parameters to CPU (ZeRO-3 only)",
+                    value=False,
+                    info="Only works with ZeRO stage 3. Further reduces GPU memory."
+                )
+
             with gr.Row():
                 start_btn = gr.Button("▶️ Start Training", variant="primary", size="lg")
                 stop_btn = gr.Button("⏹️ Stop Training", variant="stop", size="lg")
@@ -191,6 +225,10 @@ with gr.Blocks() as training_tab:
             learning_rate,
             lora_r,
             voice_prompt_drop_rate,
+            use_deepspeed,
+            deepspeed_stage,
+            deepspeed_offload_optimizer,
+            deepspeed_offload_params,
         ],
         outputs=[status_text, tensorboard_html, runs_list],
     )
