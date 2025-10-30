@@ -25,8 +25,8 @@ class TrainingConfig:
     dataset_path: str
     output_dir: str
     num_epochs: int = 3
-    batch_size: int = 4
-    learning_rate: float = 1e-4
+    batch_size: int = 8
+    learning_rate: float = 2.5e-5
     lora_r: int = 8
     lora_alpha: int = 32
     lora_dropout: float = 0.05
@@ -37,6 +37,17 @@ class TrainingConfig:
     eval_steps: int = 500
     warmup_steps: int = 100
     voice_prompt_drop_rate: float = 0.2
+    # Critical parameters from official training example
+    train_diffusion_head: bool = True
+    gradient_clipping: bool = True
+    ddpm_batch_mul: int = 4
+    diffusion_loss_weight: float = 1.4
+    ce_loss_weight: float = 0.04
+    lora_target_modules: str = "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
+    lr_scheduler_type: str = "cosine"
+    warmup_ratio: float = 0.03
+    max_grad_norm: float = 0.8
+    gradient_accumulation_steps: int = 1
 
 
 class TrainingManager:
@@ -170,6 +181,8 @@ class TrainingManager:
             str(config.num_epochs),
             "--per_device_train_batch_size",
             str(config.batch_size),
+            "--gradient_accumulation_steps",
+            str(config.gradient_accumulation_steps),
             "--learning_rate",
             str(config.learning_rate),
             "--lora_r",
@@ -178,14 +191,28 @@ class TrainingManager:
             str(config.lora_alpha),
             "--lora_dropout",
             str(config.lora_dropout),
+            "--lora_target_modules",
+            config.lora_target_modules,
             "--save_steps",
             str(config.save_steps),
             "--logging_steps",
             str(config.logging_steps),
             "--warmup_steps",
             str(config.warmup_steps),
+            "--warmup_ratio",
+            str(config.warmup_ratio),
             "--voice_prompt_drop_rate",
             str(config.voice_prompt_drop_rate),
+            "--lr_scheduler_type",
+            config.lr_scheduler_type,
+            "--max_grad_norm",
+            str(config.max_grad_norm),
+            "--ddpm_batch_mul",
+            str(config.ddpm_batch_mul),
+            "--diffusion_loss_weight",
+            str(config.diffusion_loss_weight),
+            "--ce_loss_weight",
+            str(config.ce_loss_weight),
             "--logging_dir",
             str(run_dir / "logs"),
             "--report_to",
@@ -199,6 +226,11 @@ class TrainingManager:
             cmd.append("--bf16")
         if config.gradient_checkpointing:
             cmd.append("--gradient_checkpointing")
+        if config.gradient_clipping:
+            cmd.append("--gradient_clipping")
+        if config.train_diffusion_head:
+            cmd.append("--train_diffusion_head")
+            cmd.append("True")
 
         log_file = run_dir / "train.log"
         process = subprocess.Popen(

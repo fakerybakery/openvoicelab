@@ -15,11 +15,11 @@ def format_duration(seconds):
         return f"{seconds:.1f}s"
     elif seconds < 3600:
         minutes = seconds / 60
-        return f"{minutes:.1f}m ({seconds:.1f}s)"
+        return f"{minutes:.1f}m ({seconds:.0f}s)"
     else:
         hours = seconds / 3600
-        minutes = (seconds % 3600) / 60
-        return f"{hours:.1f}h ({minutes:.0f}m)"
+        total_minutes = seconds / 60
+        return f"{hours:.1f}h ({total_minutes:.0f}m)"
 
 
 def start_processing(input_dir, dataset_name, whisper_model, progress=gr.Progress()):

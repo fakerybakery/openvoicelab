@@ -138,9 +138,11 @@ with gr.Blocks() as training_tab:
             with gr.Accordion("Training Parameters", open=False):
                 num_epochs = gr.Slider(label="Epochs", minimum=1, maximum=20, value=3, step=1)
 
-                batch_size = gr.Slider(label="Batch Size", minimum=1, maximum=16, value=4, step=1)
+                batch_size = gr.Slider(label="Batch Size", minimum=1, maximum=16, value=8, step=1,
+                                      info="Official recommendation: 8")
 
-                learning_rate = gr.Number(label="Learning Rate", value=1e-4, precision=6)
+                learning_rate = gr.Number(label="Learning Rate", value=2.5e-5, precision=6,
+                                         info="Official recommendation: 2.5e-5")
 
                 lora_r = gr.Slider(label="LoRA Rank (r)", minimum=4, maximum=64, value=8, step=4)
 
