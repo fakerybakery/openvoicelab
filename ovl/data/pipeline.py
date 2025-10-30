@@ -193,11 +193,15 @@ class DatasetBuilder:
 
             self.save_ljspeech_format(transcripts, dataset_name, wavs_dir, metadata_path)
 
+            # Calculate total duration
+            total_duration = self._calculate_dataset_duration(dataset_dir)
+
             # Save dataset info
             info = {
                 "name": dataset_name,
                 "created_at": datetime.now().isoformat(),
                 "num_samples": len(transcripts),
+                "total_duration": total_duration,
                 "whisper_model": whisper_model,
                 "input_dir": str(input_dir),
             }
@@ -217,8 +221,26 @@ class DatasetBuilder:
         thread.start()
         return thread
 
+    def _calculate_dataset_duration(self, dataset_dir: Path) -> float:
+        """Calculate total duration of all audio files in dataset (in seconds)"""
+        wavs_dir = dataset_dir / "wavs"
+        if not wavs_dir.exists():
+            return 0.0
+
+        total_duration = 0.0
+        for wav_file in wavs_dir.glob("*.wav"):
+            try:
+                metadata = torchaudio.info(str(wav_file))
+                duration = metadata.num_frames / metadata.sample_rate
+                total_duration += duration
+            except Exception:
+                # Skip files that can't be read
+                continue
+
+        return total_duration
+
     def list_datasets(self) -> List[Dict]:
-        """List all created datasets"""
+        """List all created datasets with duration information"""
         datasets = []
         for dataset_dir in self.output_dir.iterdir():
             if not dataset_dir.is_dir():
@@ -227,6 +249,16 @@ class DatasetBuilder:
             info_path = dataset_dir / "info.json"
             if info_path.exists():
                 info = json.loads(info_path.read_text())
+
+                # Calculate total duration if not already cached
+                if "total_duration" not in info:
+                    info["total_duration"] = self._calculate_dataset_duration(dataset_dir)
+                    # Update info.json with duration
+                    try:
+                        info_path.write_text(json.dumps(info, indent=2))
+                    except Exception:
+                        pass  # Continue even if we can't write
+
                 datasets.append(info)
 
         return sorted(datasets, key=lambda x: x.get("created_at", ""), reverse=True)

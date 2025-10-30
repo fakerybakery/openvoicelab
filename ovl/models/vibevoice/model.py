@@ -29,6 +29,29 @@ class VibeVoiceModel(TTSModel):
         print(f"Loading VibeVoice model on {device}...")
         self._load_model()
 
+    def _print_lora_report(self, report):
+        """Print detailed LoRA loading report"""
+        print("\n" + "="*60)
+        print("LoRA Loading Report")
+        print("="*60)
+        print(f"Adapter root: {report.adapter_root}")
+        print("\nComponents loaded:")
+        print(f"  ✓ Language Model LoRA:      {'YES' if report.language_model else 'NO'}")
+        print(f"  ✓ Diffusion Head LoRA:      {'YES' if report.diffusion_head_lora else 'NO'}")
+        print(f"  ✓ Diffusion Head Full:      {'YES' if report.diffusion_head_full else 'NO'}")
+        print(f"  ✓ Acoustic Connector:       {'YES' if report.acoustic_connector else 'NO'}")
+        print(f"  ✓ Semantic Connector:       {'YES' if report.semantic_connector else 'NO'}")
+
+        loaded_count = sum([
+            report.language_model,
+            report.diffusion_head_lora,
+            report.diffusion_head_full,
+            report.acoustic_connector,
+            report.semantic_connector
+        ])
+        print(f"\nTotal components loaded: {loaded_count}/5")
+        print("="*60 + "\n")
+
     def _load_model(self):
         """Load processor and model"""
         # Load processor
@@ -96,7 +119,8 @@ class VibeVoiceModel(TTSModel):
                     print(f"Downloading LoRA adapter from HuggingFace: {self.checkpoint_path}")
                     local_path = snapshot_download(repo_id=self.checkpoint_path)
                     print(f"Downloaded to: {local_path}")
-                    load_lora_assets(self.model, local_path)
+                    report = load_lora_assets(self.model, local_path)
+                    self._print_lora_report(report)
                 except Exception as e:
                     print(f"Failed to download from HuggingFace: {e}")
                     raise ValueError(
@@ -104,7 +128,8 @@ class VibeVoiceModel(TTSModel):
                     )
             else:
                 # Local path
-                load_lora_assets(self.model, self.checkpoint_path)
+                report = load_lora_assets(self.model, self.checkpoint_path)
+                self._print_lora_report(report)
 
         self.model.eval()
         self.model.set_ddpm_inference_steps(num_steps=10)

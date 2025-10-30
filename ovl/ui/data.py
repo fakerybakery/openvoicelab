@@ -9,6 +9,19 @@ dataset_builder = DatasetBuilder()
 processing_state = {"active": False, "progress": 0, "status": "", "dataset_name": ""}
 
 
+def format_duration(seconds):
+    """Format duration in seconds to human-readable string"""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    elif seconds < 3600:
+        minutes = seconds / 60
+        return f"{minutes:.1f}m ({seconds:.1f}s)"
+    else:
+        hours = seconds / 3600
+        minutes = (seconds % 3600) / 60
+        return f"{hours:.1f}h ({minutes:.0f}m)"
+
+
 def start_processing(input_dir, dataset_name, whisper_model, progress=gr.Progress()):
     """Start dataset processing"""
     if not input_dir or not os.path.exists(input_dir):
@@ -38,7 +51,9 @@ def start_processing(input_dir, dataset_name, whisper_model, progress=gr.Progres
             datasets_text = "## Created Datasets\n\n"
             for ds in datasets:
                 datasets_text += f"**{ds['name']}**\n"
-                datasets_text += f"- Samples: {ds['num_samples']}\n"
+                datasets_text += f"- Samples: **{ds['num_samples']}**\n"
+                duration = ds.get('total_duration', 0)
+                datasets_text += f"- Duration: **{format_duration(duration)}**\n"
                 datasets_text += f"- Created: {ds['created_at']}\n"
                 datasets_text += f"- Location: `data/{ds['name']}/`\n\n"
 
@@ -55,11 +70,19 @@ def refresh_datasets():
     if not datasets:
         return gr.update(value="No datasets created yet")
 
-    # Format datasets list
+    # Format datasets list with summary
+    total_samples = sum(ds.get('num_samples', 0) for ds in datasets)
+    total_duration = sum(ds.get('total_duration', 0) for ds in datasets)
+
     datasets_text = "## Created Datasets\n\n"
+    datasets_text += f"**Summary:** {len(datasets)} dataset(s) • {total_samples} total samples • {format_duration(total_duration)} total\n\n"
+    datasets_text += "---\n\n"
+
     for ds in datasets:
         datasets_text += f"**{ds['name']}**\n"
-        datasets_text += f"- Samples: {ds['num_samples']}\n"
+        datasets_text += f"- Samples: **{ds['num_samples']}**\n"
+        duration = ds.get('total_duration', 0)
+        datasets_text += f"- Duration: **{format_duration(duration)}**\n"
         datasets_text += f"- Created: {ds['created_at']}\n"
         datasets_text += f"- Location: `data/{ds['name']}/`\n\n"
 
