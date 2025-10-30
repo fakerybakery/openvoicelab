@@ -302,7 +302,7 @@ class TrainingManager:
             "--remove_unused_columns",
             "False",
             "--do_train",
-        ]
+        ])
 
         if config.bf16:
             cmd.append("--bf16")
