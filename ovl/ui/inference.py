@@ -176,10 +176,11 @@ def generate_speech(
         # Collect selected speakers
         selected_speakers = [voice_1, voice_2, voice_3, voice_4][:num_speakers]
 
-        # Validate speaker selections
-        for i, speaker in enumerate(selected_speakers):
-            if not speaker:
-                return None, f"Error: Please select a valid voice for Speaker {i+1}."
+        # Validate speaker selections only when voice cloning is enabled
+        if enable_voice_cloning:
+            for i, speaker in enumerate(selected_speakers):
+                if not speaker:
+                    return None, f"Error: Please select a valid voice for Speaker {i+1}."
 
         # Defend against common mistake
         script = text.replace("'", "'")
