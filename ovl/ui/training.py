@@ -42,6 +42,7 @@ def start_training(
     model_path,
     num_epochs,
     batch_size,
+    gradient_accumulation_steps,
     learning_rate,
     lora_r,
     voice_prompt_drop_rate,
@@ -58,6 +59,8 @@ def start_training(
     if not model_path:
         raise gr.Error("Please provide model path")
 
+    gradient_accumulation_steps = int(gradient_accumulation_steps)
+
     # Create config
     config = TrainingConfig(
         model_path=model_path,
@@ -65,6 +68,7 @@ def start_training(
         output_dir=f"training_runs/output_{dataset_name}",
         num_epochs=num_epochs,
         batch_size=batch_size,
+        gradient_accumulation_steps=gradient_accumulation_steps,
         learning_rate=learning_rate,
         lora_r=lora_r,
         voice_prompt_drop_rate=voice_prompt_drop_rate,
@@ -141,6 +145,15 @@ with gr.Blocks() as training_tab:
                 batch_size = gr.Slider(label="Batch Size", minimum=1, maximum=16, value=8, step=1,
                                       info="Official recommendation: 8")
 
+                gradient_accumulation = gr.Slider(
+                    label="Gradient Accumulation Steps",
+                    minimum=1,
+                    maximum=128,
+                    value=1,
+                    step=1,
+                    info="Accumulate gradients across steps to simulate larger batches",
+                )
+
                 learning_rate = gr.Number(label="Learning Rate", value=2.5e-5, precision=6,
                                          info="Official recommendation: 2.5e-5")
 
@@ -188,6 +201,7 @@ with gr.Blocks() as training_tab:
             model_path,
             num_epochs,
             batch_size,
+            gradient_accumulation,
             learning_rate,
             lora_r,
             voice_prompt_drop_rate,
