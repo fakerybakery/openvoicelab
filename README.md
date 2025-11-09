@@ -28,6 +28,8 @@ Before you begin, make sure you have:
 
 ## Quick Start
 
+View the latest quick start guide here: https://openvoicelab.github.io/
+
 The easiest way to get started is using the provided setup scripts. These will create a Python virtual environment, install all dependencies, and launch the interface.
 
 ### Linux/macOS
