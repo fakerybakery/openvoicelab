@@ -1,6 +1,7 @@
 import os
 import threading
 from datetime import datetime
+import gc
 
 import gradio as gr
 import torch
@@ -75,8 +76,26 @@ def load_model_async(model_path, device, load_lora, lora_path, progress=gr.Progr
 def unload_model():
     """Unload the current model"""
     global model, loaded_lora_path
+
+    if model is not None:
+        try:
+            if hasattr(model, 'model') and hasattr(model.model, 'cpu'):
+                model.model.cpu()
+
+            if hasattr(model, 'model'):
+                del model.model
+            if hasattr(model, 'processor'):
+                del model.processor
+        except Exception as e:
+            print(f"Warning during model cleanup: {e}")
+
     model = None
     loaded_lora_path = None
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     return (
         "Model unloaded",
         gr.update(value="Load Model", variant="primary"),

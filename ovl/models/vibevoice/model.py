@@ -82,9 +82,9 @@ class VibeVoiceModel(TTSModel):
                 self.model = VibeVoiceForConditionalGenerationInference.from_pretrained(
                     self.model_path,
                     torch_dtype=load_dtype,
-                    device_map="cuda",
                     attn_implementation=attn_impl,
                 )
+                self.model.to("cuda")
             else:  # cpu
                 self.model = VibeVoiceForConditionalGenerationInference.from_pretrained(
                     self.model_path,
@@ -98,11 +98,10 @@ class VibeVoiceModel(TTSModel):
                 self.model = VibeVoiceForConditionalGenerationInference.from_pretrained(
                     self.model_path,
                     torch_dtype=load_dtype,
-                    device_map=(self.device if self.device in ("cuda", "cpu") else None),
                     attn_implementation="sdpa",
                 )
-                if self.device == "mps":
-                    self.model.to("mps")
+                if self.device in ("mps", "cuda"):
+                    self.model.to(self.device)
             else:
                 raise e
 
