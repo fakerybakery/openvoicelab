@@ -22,7 +22,7 @@ def format_duration(seconds):
         return f"{hours:.1f}h ({total_minutes:.0f}m)"
 
 
-def start_processing(input_dir, dataset_name, whisper_model, progress=gr.Progress()):
+def start_processing(input_dir, dataset_name, whisper_model, min_duration, max_duration, progress=gr.Progress()):
     """Start dataset processing"""
     if not input_dir or not os.path.exists(input_dir):
         raise gr.Error("Please provide a valid input directory")
@@ -41,6 +41,8 @@ def start_processing(input_dir, dataset_name, whisper_model, progress=gr.Progres
             dataset_name=dataset_name.strip(),
             whisper_model=whisper_model,
             progress_callback=progress_callback,
+            min_segment_duration=min_duration,
+            max_segment_duration=max_duration,
         )
 
         # Refresh datasets list after completion
@@ -123,6 +125,24 @@ with gr.Blocks() as data_tab:
                 info="Larger models are more accurate but slower",
             )
 
+            with gr.Accordion("Segmentation Settings", open=False):
+                min_duration = gr.Slider(
+                    label="Min Segment Duration (seconds)",
+                    minimum=3,
+                    maximum=15,
+                    value=7,
+                    step=1,
+                    info="Segments shorter than this will be merged together",
+                )
+                max_duration = gr.Slider(
+                    label="Max Segment Duration (seconds)",
+                    minimum=10,
+                    maximum=30,
+                    value=20,
+                    step=1,
+                    info="Segments longer than this will be split",
+                )
+
             start_btn = gr.Button("Start Processing", variant="primary", size="lg")
 
         with gr.Column(scale=1):
@@ -133,18 +153,21 @@ with gr.Blocks() as data_tab:
     gr.Markdown(
         """
     ### How it works:
-    1. **VAD Segmentation**: Audio files are split into speech segments using Silero VAD
-    2. **Transcription**: Each segment is transcribed using Whisper
-    3. **LJSpeech Format**: Output is saved in LJSpeech format at `data/{dataset_name}/`
-        - `wavs/` - Audio files
+    1. **VAD Segmentation**: Audio files are split into coarse speech segments using Silero VAD
+    2. **Whisper Transcription**: Each VAD segment is transcribed using Whisper with timestamp-based segmentation
+    3. **Smart Merging**: Short segments (<7s default) are merged together, long segments (>20s default) are split
+    4. **LJSpeech Format**: Output is saved in LJSpeech format at `data/{dataset_name}/`
+        - `wavs/` - Audio files (7-20s each by default)
         - `metadata.csv` - Transcriptions in format: `filename|text|text`
+
+    **Note**: The new segmentation approach prevents OOM errors during training by keeping segments in the optimal 7-20s range.
     """
     )
 
     # Event handlers
     start_btn.click(
         fn=start_processing,
-        inputs=[input_dir, dataset_name, whisper_model],
+        inputs=[input_dir, dataset_name, whisper_model, min_duration, max_duration],
         outputs=[datasets_list],
     )
 
