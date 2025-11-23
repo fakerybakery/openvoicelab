@@ -3,6 +3,7 @@ rich
 gradio
 torch
 torchaudio
+torchcodec
 click
 tensorboardX
 silero_vad
