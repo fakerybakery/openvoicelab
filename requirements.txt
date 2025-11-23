@@ -8,3 +8,4 @@ tensorboardX
 silero_vad
 librosa
 soundfile
+peft==0.17.0
