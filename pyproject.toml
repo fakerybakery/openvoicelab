@@ -26,3 +26,9 @@ dependencies = {file = ["requirements.txt"]}
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["ovl*"]
+
+[tool.setuptools.package-data]
+ovl = [
+    "voices/*.wav",
+    "voices/streaming/*.pt",
+]
