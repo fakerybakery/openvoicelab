@@ -224,14 +224,30 @@ class DatasetBuilder:
         # Combine audio with small silence between
         sample_rate = segments[0]["sample_rate"]
         silence_samples = int(0.2 * sample_rate)  # 0.2s silence
-        silence = torch.zeros(1, silence_samples)
+
+        # Determine number of channels from first segment
+        num_channels = segments[0]["audio"].shape[0]
+        silence = torch.zeros(num_channels, silence_samples)
 
         combined_audio_parts = []
         combined_texts = []
         total_duration = 0.0
 
         for i, seg in enumerate(segments):
-            combined_audio_parts.append(seg["audio"])
+            audio = seg["audio"]
+            # Ensure all segments have the same number of channels
+            if audio.shape[0] != num_channels:
+                if audio.shape[0] == 1 and num_channels == 2:
+                    # Convert mono to stereo by duplicating the channel
+                    audio = audio.repeat(2, 1)
+                elif audio.shape[0] == 2 and num_channels == 1:
+                    # Convert stereo to mono by averaging channels
+                    audio = audio.mean(dim=0, keepdim=True)
+                else:
+                    # For other mismatches, take first num_channels channels
+                    audio = audio[:num_channels, :]
+
+            combined_audio_parts.append(audio)
             combined_texts.append(seg["text"])
             total_duration += seg["duration"]
 
