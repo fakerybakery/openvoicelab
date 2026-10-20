@@ -1,104 +1,99 @@
-import os
+"""Voices tab: manage the reference clips used for voice cloning."""
 
 import gradio as gr
 
-from ovl.models.vibevoice.voices import VoiceMapper
-
-# Initialize voice mapper
-voice_mapper = VoiceMapper()
+from ovl import voice_library
+from ovl.audio import duration
 
 
-def refresh_voices():
-    """Refresh the voice list"""
-    voice_mapper.refresh()
-    voices = voice_mapper.list_voices()
-    first_voice = voices[0] if voices else None
-    preview = preview_voice(first_voice) if first_voice else None
-    return gr.update(choices=voices, value=first_voice), preview
+def _select(name):
+    if not name:
+        return None, "", ""
+    path = voice_library.audio_path(name)
+    return str(path), voice_library.transcript(name), f"<small>`{path}` · {duration(str(path)):.1f}s</small>"
 
 
-def upload_voice(audio_file, voice_name):
-    """Upload a new voice"""
-    if not audio_file:
-        raise gr.Error("Please upload an audio file")
+def _refresh(selected=None):
+    voices = voice_library.list_voices()
+    selected = selected if selected in voices else (voices[0] if voices else None)
+    return gr.update(choices=voices, value=selected), *_select(selected)
 
-    if not voice_name or voice_name.strip() == "":
-        raise gr.Error("Please provide a voice name")
 
+def transcribe(audio_path, model_id):
+    if not audio_path:
+        raise gr.Error("No audio to transcribe")
+    from ovl import asr
+
+    gr.Info("Transcribing with Whisper...")
+    text = asr.transcribe(audio_path, model_id)
+    asr.unload()
+    return text
+
+
+def add_voice(audio, name, text, auto, model_id):
+    if not audio:
+        raise gr.Error("Upload or record a clip first")
+    if not (name or "").strip():
+        raise gr.Error("Give the voice a name")
+    if auto and not (text or "").strip():
+        text = transcribe(audio, model_id)
     try:
-        voice_mapper.add_voice(voice_name.strip(), audio_file)
-        gr.Success(f"Successfully added voice: {voice_name}")
-        return refresh_voices()
-    except Exception as e:
-        raise gr.Error(f"Error adding voice: {str(e)}")
+        saved = voice_library.add_voice(name, audio, text)
+    except ValueError as e:
+        raise gr.Error(str(e))
+    gr.Success(f"Added voice '{saved}'")
+    return *_refresh(saved), None, "", ""
 
 
-def delete_voice(voice_name):
-    """Delete a voice"""
-    if not voice_name:
-        raise gr.Error("Please select a voice to delete")
-
-    try:
-        voice_mapper.delete_voice(voice_name)
-        gr.Success(f"Successfully deleted voice: {voice_name}")
-        return refresh_voices()
-    except Exception as e:
-        raise gr.Error(f"Error deleting voice: {str(e)}")
+def save_transcript(name, text):
+    if not name:
+        raise gr.Error("Select a voice")
+    voice_library.set_transcript(name, text)
+    gr.Success("Transcript saved")
 
 
-def preview_voice(voice_name):
-    """Preview a voice"""
-    if not voice_name:
-        return None
-
-    try:
-        voice_path = voice_mapper.get_voice_path(voice_name)
-        return voice_path
-    except Exception as e:
-        print(f"Error previewing voice: {e}")
-        return None
+def delete_voice(name):
+    if not name:
+        raise gr.Error("Select a voice")
+    voice_library.delete_voice(name)
+    gr.Info(f"Deleted '{name}'")
+    return _refresh()
 
 
-with gr.Blocks() as voices_tab:
-    gr.Markdown("# Voices")
+def build(demo: gr.Blocks):
+    from ovl.asr import DEFAULT_MODEL, WHISPER_MODELS
 
+    gr.Markdown(
+        "Reference clips for voice cloning. 5–20 seconds of clean speech from one speaker works best. "
+        "Some models need a transcript of the clip; it's generated automatically if you leave it empty."
+    )
     with gr.Row():
         with gr.Column():
-            gr.Markdown("### Upload New Voice")
-            voice_name_input = gr.Textbox(label="Voice Name", placeholder="e.g., john_doe")
-            audio_upload = gr.Audio(label="Upload Audio File", type="filepath")
-            upload_btn = gr.Button("Upload Voice", variant="primary")
-
+            gr.Markdown("### Your voices")
+            voice = gr.Dropdown(label="Voice", choices=voice_library.list_voices())
+            preview = gr.Audio(label="Preview", type="filepath", interactive=False)
+            info = gr.Markdown()
+            transcript = gr.Textbox(label="Transcript", lines=3)
+            with gr.Row():
+                save_btn = gr.Button("Save transcript")
+                retranscribe_btn = gr.Button("Re-transcribe")
+                delete_btn = gr.Button("Delete voice", variant="stop")
         with gr.Column():
-            gr.Markdown("### Manage Voices")
-            voice_dropdown = gr.Dropdown(
-                label="Select Voice",
-                choices=voice_mapper.list_voices(),
-                value=(voice_mapper.list_voices()[0] if voice_mapper.list_voices() else None),
-            )
-            refresh_btn = gr.Button("Refresh List")
-            preview_audio = gr.Audio(label="Preview", interactive=False)
-            delete_btn = gr.Button("Delete Selected Voice", variant="stop")
+            gr.Markdown("### Add a voice")
+            new_audio = gr.Audio(label="Clip", type="filepath", sources=["upload", "microphone"])
+            new_name = gr.Textbox(label="Name", placeholder="e.g. narrator")
+            new_text = gr.Textbox(label="Transcript (optional)", lines=3)
+            auto = gr.Checkbox(label="Transcribe automatically if empty", value=True)
+            whisper = gr.Dropdown(WHISPER_MODELS, value=DEFAULT_MODEL, label="Whisper model")
+            add_btn = gr.Button("Add voice", variant="primary")
 
-    # Event handlers
-    upload_btn.click(
-        fn=upload_voice,
-        inputs=[audio_upload, voice_name_input],
-        outputs=[voice_dropdown, preview_audio],
+    voice.change(_select, voice, [preview, transcript, info])
+    save_btn.click(save_transcript, [voice, transcript])
+    retranscribe_btn.click(transcribe, [preview, whisper], transcript)
+    delete_btn.click(delete_voice, voice, [voice, preview, transcript, info])
+    add_btn.click(
+        add_voice,
+        [new_audio, new_name, new_text, auto, whisper],
+        [voice, preview, transcript, info, new_audio, new_name, new_text],
     )
-
-    refresh_btn.click(fn=refresh_voices, inputs=[], outputs=[voice_dropdown, preview_audio])
-
-    voice_dropdown.change(fn=preview_voice, inputs=[voice_dropdown], outputs=[preview_audio])
-
-    delete_btn.click(
-        fn=delete_voice,
-        inputs=[voice_dropdown],
-        outputs=[voice_dropdown, preview_audio],
-    )
-
-    # Load first voice on page load
-    voices_tab.load(
-        fn=lambda: (preview_voice(voice_mapper.list_voices()[0]) if voice_mapper.list_voices() else None),
-        outputs=[preview_audio],
-    )
+    demo.load(lambda v: _refresh(v), voice, [voice, preview, transcript, info])

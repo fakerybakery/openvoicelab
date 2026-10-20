@@ -1,668 +1,432 @@
-import os
-import threading
+"""Generate tab: load a model and synthesize speech.
+
+Everything shown here is driven by the backend's capabilities: the spec says what a
+model family can do, and the loaded checkpoint can narrow that down (LoadInfo).
+"""
+
+import logging
+from dataclasses import asdict
 from datetime import datetime
-import gc
 
 import gradio as gr
-import torch
 
-from ovl.models.vibevoice import (
-    VibeVoiceModel,
-    VibeVoiceStreamingModel,
-    VibeVoiceModelType,
-    detect_model_type,
-    load_vibevoice_model,
-)
-from ovl.models.vibevoice.voices import VoiceMapper, StreamingVoiceMapper
+from ovl import paths, voice_library
+from ovl.backends import all_backends, get
+from ovl.runtime import envs
+from ovl.runtime.client import WorkerError
+from ovl.runtime.session import session
+from ovl.ui.common import backend_choices, capability_summary, variant_choices
 
-# Global state
-model = None
-model_type = None  # VibeVoiceModelType.STANDARD or VibeVoiceModelType.STREAMING
-model_loading = False
-loaded_lora_path = None
-voice_mapper = VoiceMapper()
-streaming_voice_mapper = StreamingVoiceMapper()
+logger = logging.getLogger(__name__)
+
+MAX_SPEAKERS = 4
+PRESET, LIBRARY, UPLOAD, DESIGN, DEFAULT = "Preset voice", "Voice library", "Upload clip", "Describe a voice", "Default voice"
+SPEAKER_FIELDS = ("group", "source", "preset", "library", "upload", "transcript", "design")
+
+_last_log = ""
 
 
-def get_available_devices():
-    """Get list of available devices"""
-    devices = []
-    if torch.cuda.is_available():
-        devices.append("cuda")
-    if torch.backends.mps.is_available():
-        devices.append("mps")
-    devices.append("cpu")  # CPU always available
-    return devices
+def spec_caps(spec) -> dict:
+    caps = asdict(spec.capabilities)
+    caps["languages"] = list(caps["languages"])
+    caps["preset_list"] = []
+    return caps
 
 
-def get_default_device():
-    """Auto-detect best available device: cuda > mps > cpu"""
-    devices = get_available_devices()
-    return devices[0]  # First device is the best one
+def current_caps(backend_id: str) -> dict:
+    """Capabilities of the selected backend: the loaded checkpoint's if it is loaded."""
+    spec = get(backend_id)
+    caps = spec_caps(spec)
+    model = session.current
+    if model and model.spec.id == backend_id:
+        caps.update(model.info.get("capabilities") or {})
+        caps["preset_list"] = model.info.get("presets") or []
+        caps["languages"] = model.info.get("languages") or caps["languages"]
+    return caps
 
 
-def load_model_async(model_path, device, load_lora, lora_path, ddpm_steps, progress=gr.Progress()):
-    """Load the VibeVoice model asynchronously with auto model type detection"""
-    global model, model_type, model_loading, loaded_lora_path
-
-    model_loading = True
-    try:
-        progress(0, desc="Detecting model type...")
-
-        # Auto-detect model type
-        detected_type = detect_model_type(model_path)
-        model_type = detected_type
-
-        progress(0.1, desc=f"Loading {detected_type.value} model...")
-
-        if detected_type == VibeVoiceModelType.STREAMING:
-            # Load streaming model
-            model = VibeVoiceStreamingModel(
-                model_path=model_path,
-                device=device,
-                ddpm_steps=ddpm_steps,
-            )
-            loaded_lora_path = None  # Streaming model doesn't support LoRA
-            status_msg = f"✓ VibeVoice-Realtime model loaded on {device}\n✓ DDPM steps: {ddpm_steps}"
-        else:
-            # Load standard model
-            checkpoint_path = lora_path if load_lora and lora_path else None
-            model = VibeVoiceModel(model_path=model_path, device=device, checkpoint_path=checkpoint_path)
-            loaded_lora_path = checkpoint_path
-            status_msg = f"✓ VibeVoice model loaded on {device}"
-            if checkpoint_path:
-                status_msg += f"\n✓ LoRA loaded from {checkpoint_path}"
-
-        model_loading = False
-
-        # Return different UI state based on model type
-        is_streaming = detected_type == VibeVoiceModelType.STREAMING
-        return (
-            status_msg,
-            gr.update(value="Unload Model", variant="stop"),
-            gr.update(interactive=True),
-            gr.update(interactive=True),
-            gr.update(value=bool(loaded_lora_path)),  # load_lora checkbox
-            gr.update(value=loaded_lora_path or ""),  # lora_path textbox
-            gr.update(visible=bool(loaded_lora_path)),  # lora_row visibility
-            gr.update(visible=not is_streaming),  # standard_voice_row
-            gr.update(visible=is_streaming),  # streaming_voice_row
-            gr.update(visible=not is_streaming),  # enable_cloning (only for standard)
-            gr.update(visible=is_streaming),  # ddpm_steps_slider (only for streaming)
-        )
-    except Exception as e:
-        model_loading = False
-        model = None
-        model_type = None
-        loaded_lora_path = None
-        return (
-            f"✗ Error loading model: {str(e)}",
-            gr.update(value="Load Model", variant="primary"),
-            gr.update(interactive=True),
-            gr.update(interactive=True),
-            gr.update(value=False),  # load_lora checkbox
-            gr.update(value=""),  # lora_path textbox
-            gr.update(visible=False),  # lora_row visibility
-            gr.update(visible=True),  # standard_voice_row
-            gr.update(visible=False),  # streaming_voice_row
-            gr.update(visible=True),  # enable_cloning
-            gr.update(visible=False),  # ddpm_steps_slider
-        )
+def voice_sources(caps: dict):
+    sources = []
+    if caps["presets"]:
+        sources.append(PRESET)
+    if caps["clone"]:
+        sources += [LIBRARY, UPLOAD]
+    if caps["voice_design"]:
+        sources.append(DESIGN)
+    if caps["no_voice"]:
+        sources.append(DEFAULT)
+    return sources
 
 
-def unload_model():
-    """Unload the current model"""
-    global model, model_type, loaded_lora_path
-
-    if model is not None:
-        try:
-            if hasattr(model, 'model') and hasattr(model.model, 'cpu'):
-                model.model.cpu()
-
-            if hasattr(model, 'model'):
-                del model.model
-            if hasattr(model, 'processor'):
-                del model.processor
-        except Exception as e:
-            print(f"Warning during model cleanup: {e}")
-
-    model = None
-    model_type = None
-    loaded_lora_path = None
-
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-    return (
-        "Model unloaded",
-        gr.update(value="Load Model", variant="primary"),
-        gr.update(interactive=True),
-        gr.update(interactive=True),
-        gr.update(value=False),  # load_lora checkbox
-        gr.update(value=""),  # lora_path textbox
-        gr.update(visible=False),  # lora_row visibility
-        gr.update(visible=True),  # standard_voice_row (show by default)
-        gr.update(visible=False),  # streaming_voice_row
-        gr.update(visible=True),  # enable_cloning
-        gr.update(visible=False),  # ddpm_steps_slider
-    )
+def lora_choices():
+    return sorted(str(p) for p in paths.runs_dir().glob("**/lora") if p.is_dir())
 
 
-def toggle_model(model_path, device, load_lora, lora_path, ddpm_steps):
-    """Toggle between load and unload"""
-    global model, model_loading
-
-    if model_loading:
-        return (
-            "⏳ Model is currently loading...",
-            gr.update(value="Load Model", variant="primary", interactive=False),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(),  # load_lora checkbox
-            gr.update(),  # lora_path textbox
-            gr.update(),  # lora_row visibility
-            gr.update(),  # standard_voice_row
-            gr.update(),  # streaming_voice_row
-            gr.update(),  # enable_cloning
-            gr.update(),  # ddpm_steps_slider
-        )
-
-    if model is not None:
-        return unload_model()
-    else:
-        return load_model_async(model_path, device, load_lora, lora_path, ddpm_steps)
-
-
-def toggle_lora_path(load_lora):
-    """Show/hide LoRA path input based on checkbox"""
-    return gr.update(visible=load_lora)
-
-
-def get_initial_state():
-    """Get initial UI state based on model status"""
-    global model, model_type, model_loading, loaded_lora_path
-
-    if model_loading:
-        return (
-            "⏳ Model is loading...",
-            gr.update(value="Load Model", variant="primary", interactive=False),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(),  # load_lora checkbox
-            gr.update(),  # lora_path textbox
-            gr.update(),  # lora_row visibility
-            gr.update(),  # standard_voice_row
-            gr.update(),  # streaming_voice_row
-            gr.update(),  # enable_cloning
-            gr.update(),  # ddpm_steps_slider
-        )
-    elif model is not None:
-        is_streaming = model_type == VibeVoiceModelType.STREAMING
-        if is_streaming:
-            status_msg = "✓ VibeVoice-Realtime model already loaded"
-        else:
-            status_msg = "✓ VibeVoice model already loaded"
-            if loaded_lora_path:
-                status_msg += f"\n✓ LoRA: {loaded_lora_path}"
-        return (
-            status_msg,
-            gr.update(value="Unload Model", variant="stop"),
-            gr.update(interactive=True),
-            gr.update(interactive=True),
-            gr.update(value=bool(loaded_lora_path)),  # load_lora checkbox
-            gr.update(value=loaded_lora_path or ""),  # lora_path textbox
-            gr.update(visible=bool(loaded_lora_path)),  # lora_row visibility
-            gr.update(visible=not is_streaming),  # standard_voice_row
-            gr.update(visible=is_streaming),  # streaming_voice_row
-            gr.update(visible=not is_streaming),  # enable_cloning
-            gr.update(visible=is_streaming),  # ddpm_steps_slider
-        )
-    else:
-        return (
-            "",
-            gr.update(value="Load Model", variant="primary"),
-            gr.update(interactive=True),
-            gr.update(interactive=True),
-            gr.update(value=False),  # load_lora checkbox
-            gr.update(value=""),  # lora_path textbox
-            gr.update(visible=False),  # lora_row visibility
-            gr.update(visible=True),  # standard_voice_row (show by default)
-            gr.update(visible=False),  # streaming_voice_row
-            gr.update(visible=True),  # enable_cloning
-            gr.update(visible=False),  # ddpm_steps_slider
-        )
-
-
-def generate_speech(
-    num_speakers, text, voice_1, voice_2, voice_3, voice_4,
-    streaming_voice, cfg_scale, enable_voice_cloning, progress=gr.Progress()
-):
-    """Generate speech from text using either standard or streaming model"""
+def model_status() -> str:
+    model = session.current
     if model is None:
-        return None, "Please load the model first"
-
-    if not text or text.strip() == "":
-        return None, "Please enter some text"
-
-    try:
-        import re
-        import librosa
-        import numpy as np
-        import soundfile as sf
-
-        # Check if we're using the streaming model
-        is_streaming = model_type == VibeVoiceModelType.STREAMING
-
-        if is_streaming:
-            # Streaming model generation
-            return _generate_speech_streaming(text, streaming_voice, cfg_scale, progress)
-        else:
-            # Standard model generation
-            return _generate_speech_standard(
-                num_speakers, text, voice_1, voice_2, voice_3, voice_4,
-                cfg_scale, enable_voice_cloning, progress
-            )
-
-    except Exception as e:
-        import traceback
-        return None, f"✗ Error: {str(e)}\n{traceback.format_exc()}"
+        return "No model loaded."
+    notes = model.info.get("notes")
+    return f"**Loaded:** {model.spec.name} · `{model.model_id}`" + (f"\n\n{notes}" if notes else "")
 
 
-def _generate_speech_streaming(text, streaming_voice, cfg_scale, progress=gr.Progress()):
-    """Generate speech using the streaming model"""
-    if not streaming_voice:
-        return None, "Error: Please select a streaming voice."
+class GenerateTab:
+    def build(self, demo: gr.Blocks):
+        specs = all_backends()
+        first = specs[0]
 
-    # Defend against common mistake
-    script = text.replace("'", "'").replace('"', '"').replace('"', '"')
+        with gr.Row(equal_height=False):
+            with gr.Column(scale=2, min_width=300):
+                self.backend = gr.Dropdown(choices=backend_choices(), value=first.id, label="Model family")
+                self.backend_info = gr.Markdown(self._backend_info(first.id))
+                self.variant = gr.Dropdown(
+                    choices=variant_choices(first),
+                    value=first.default_variant.repo_id,
+                    label="Checkpoint",
+                    info="Pick one, or paste a Hugging Face repo id / local path",
+                    allow_custom_value=True,
+                )
+                self.device = gr.Dropdown(["auto", "cuda", "mps", "cpu"], value="auto", label="Device")
+                self.lora = gr.Dropdown(
+                    choices=lora_choices(),
+                    value=None,
+                    label="LoRA adapter (optional)",
+                    info="A lora/ folder from a training run",
+                    allow_custom_value=True,
+                    visible=first.capabilities.lora,
+                )
+                with gr.Row():
+                    self.load_btn = gr.Button("Load model", variant="primary")
+                    self.unload_btn = gr.Button("Unload")
+                self.status = gr.Markdown(model_status())
 
-    # Get the voice prompt path
-    try:
-        voice_prompt_path = streaming_voice_mapper.get_voice_path(streaming_voice)
-    except ValueError as e:
-        return None, f"Error: {str(e)}"
+            with gr.Column(scale=5):
+                self.text = gr.Textbox(label="Text", lines=6, placeholder="Type something to say...")
+                with gr.Row():
+                    self.language = gr.Dropdown(label="Language", visible=False)
+                    self.num_speakers = gr.Slider(1, MAX_SPEAKERS, value=1, step=1, label="Speakers", visible=False)
+                self.instruct = gr.Textbox(
+                    label="Style instruction",
+                    placeholder="e.g. Speak warmly and slowly, with a hint of excitement",
+                    visible=False,
+                )
+                self.speakers = []
+                with gr.Row():
+                    for i in range(MAX_SPEAKERS):
+                        with gr.Column(visible=i == 0, min_width=220) as group:
+                            spk = {"group": group}
+                            spk["source"] = gr.Radio(label=f"Speaker {i + 1} voice" if i else "Voice", choices=[])
+                            spk["preset"] = gr.Dropdown(label="Preset", choices=[], visible=False)
+                            spk["library"] = gr.Dropdown(label="Library voice", choices=[], visible=False)
+                            spk["upload"] = gr.Audio(label="Reference clip", type="filepath", visible=False)
+                            spk["transcript"] = gr.Textbox(label="Transcript of the clip", lines=2, visible=False)
+                            spk["design"] = gr.Textbox(
+                                label="Voice description",
+                                lines=2,
+                                placeholder="e.g. A deep, gravelly male voice with a slight Scottish accent",
+                                visible=False,
+                            )
+                        self.speakers.append(spk)
 
-    # Generate output path
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = "outputs"
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, f"streaming_generated_{timestamp}.wav")
+                with gr.Accordion("Advanced settings", open=False):
+                    self.param_groups, self.param_inputs = {}, []
+                    for spec in specs:
+                        with gr.Group(visible=spec.id == first.id) as group:
+                            for p in spec.params:
+                                self.param_inputs.append((spec.id, p.name, self._param_input(p)))
+                        self.param_groups[spec.id] = group
+                    self.seed = gr.Number(label="Seed (-1 = random)", value=-1, precision=0)
 
-    # Wrapper for Gradio progress.tqdm to ignore unsupported kwargs
-    class GradioTqdmWrapper:
-        def __call__(self, iterable, desc=None, **kwargs):
-            return progress.tqdm(iterable, desc=desc)
+                with gr.Row():
+                    self.generate_btn = gr.Button("Generate", variant="primary", size="lg")
+                    self.stop_btn = gr.Button("Stop", variant="stop", size="lg")
+                self.output = gr.Audio(label="Output", type="filepath", interactive=False, autoplay=True)
+                self.metrics = gr.Markdown()
+                with gr.Accordion("History", open=False):
+                    self.history = gr.State([])
+                    self.history_table = gr.Dataframe(
+                        headers=["Time", "Model", "Text", "Length"], interactive=False, wrap=True
+                    )
+                with gr.Accordion("Worker log", open=False):
+                    self.log = gr.Textbox(lines=15, max_lines=15, show_label=False, interactive=False, autoscroll=True)
+                    self.refresh_log = gr.Button("Refresh log", size="sm")
 
-    # Generate using streaming model
-    result = model.generate(
-        text=script,
-        voice_prompt_path=voice_prompt_path,
-        output_path=output_path,
-        cfg_scale=cfg_scale,
-        progress_callback=GradioTqdmWrapper(),
-    )
+        self._wire(demo)
 
-    status = f"""✓ Generated successfully (Streaming Model)
-Voice: {streaming_voice}
-Duration: {result.audio_duration:.2f}s
-Generation time: {result.generation_time:.2f}s
-RTF: {result.rtf:.2f}x"""
+    @staticmethod
+    def _param_input(p):
+        kw = {"label": p.label, "value": p.default, "info": p.info or None}
+        if p.kind == "bool":
+            return gr.Checkbox(**kw)
+        if p.kind == "choice":
+            return gr.Dropdown(choices=list(p.choices), **kw)
+        if p.kind == "text":
+            return gr.Textbox(**kw)
+        if p.minimum is not None and p.maximum is not None:
+            step = p.step or (1 if p.kind == "int" else 0.01)
+            return gr.Slider(p.minimum, p.maximum, step=step, **kw)
+        return gr.Number(precision=0 if p.kind == "int" else None, **kw)
 
-    return result.audio_path, status
+    @staticmethod
+    def _backend_info(backend_id: str) -> str:
+        spec = get(backend_id)
+        status = envs.status(spec)
+        line = f"{spec.description}\n\n<small>{capability_summary(spec.capabilities)} · {spec.license}</small>"
+        if status != "ready":
+            line += "\n\n*Not installed yet. **Load model** installs it first (this can take a few minutes).*"
+        return line
 
+    # --- voice panel ---------------------------------------------------------
 
-def _generate_speech_standard(
-    num_speakers, text, voice_1, voice_2, voice_3, voice_4,
-    cfg_scale, enable_voice_cloning, progress=gr.Progress()
-):
-    """Generate speech using the standard model"""
-    import re
-    import librosa
-    import numpy as np
-    import soundfile as sf
+    @property
+    def _speaker_outputs(self):
+        return [spk[f] for spk in self.speakers for f in SPEAKER_FIELDS]
 
-    # Validate inputs
-    if num_speakers < 1 or num_speakers > 4:
-        return None, "Error: Number of speakers must be between 1 and 4."
+    @property
+    def _panel_outputs(self):
+        return [self.language, self.num_speakers, self.instruct, *self._speaker_outputs]
 
-    # Collect selected speakers
-    selected_speakers = [voice_1, voice_2, voice_3, voice_4][:num_speakers]
+    def _panel_updates(self, backend_id, data=None):
+        """Updates for the language/speakers/instruct/voice controls, keeping user choices when still valid."""
+        data = data or {}
+        caps = current_caps(backend_id)
+        sources = voice_sources(caps)
+        library = voice_library.list_voices()
+        presets = caps["preset_list"]
+        max_spk = min(caps["max_speakers"] or 1, MAX_SPEAKERS)
+        n = min(int(data.get(self.num_speakers) or 1), max_spk)
+        languages = caps["languages"]
+        language = data.get(self.language)
 
-    # Validate speaker selections only when voice cloning is enabled
-    if enable_voice_cloning:
-        for i, speaker in enumerate(selected_speakers):
-            if not speaker:
-                return None, f"Error: Please select a valid voice for Speaker {i+1}."
+        def keep(value, options, fallback):
+            return value if value in options else fallback
 
-    # Defend against common mistake
-    script = text.replace("'", "'")
+        updates = [
+            gr.update(choices=languages, value=keep(language, languages, languages[0] if languages else None),
+                      visible=len(languages) > 1),
+            gr.update(maximum=max(max_spk, 2), value=n, visible=max_spk > 1),
+            gr.update(visible=bool(caps["instruct"])),
+        ]
+        needs_transcript = caps["clone_needs_transcript"]
+        for i, spk in enumerate(self.speakers):
+            src = keep(data.get(spk["source"]), sources, sources[0] if sources else None)
+            updates += [
+                gr.update(visible=i < n and bool(sources)),
+                gr.update(choices=sources, value=src, visible=len(sources) > 1),
+                gr.update(
+                    choices=presets,
+                    value=keep(data.get(spk["preset"]), presets, presets[i % len(presets)] if presets else None),
+                    visible=src == PRESET,
+                    info="" if presets else "Load the model to see its voices",
+                ),
+                gr.update(
+                    choices=library,
+                    value=keep(data.get(spk["library"]), library, library[i % len(library)] if library else None),
+                    visible=src == LIBRARY,
+                ),
+                gr.update(visible=src == UPLOAD),
+                gr.update(
+                    visible=src == UPLOAD,
+                    label="Transcript of the clip" + (" (auto-transcribed if empty)" if needs_transcript else " (optional)"),
+                ),
+                gr.update(visible=src == DESIGN),
+            ]
+        return updates
 
-    # Parse script to assign speaker IDs (similar to gradio_demo.py lines 277-293)
-    lines = script.strip().split("\n")
-    formatted_script_lines = []
-    speaker_ids_used = set()
+    def _panel_inputs(self):
+        return {self.backend, self.language, self.num_speakers,
+                *[spk[f] for spk in self.speakers for f in ("source", "preset", "library")]}
 
-    # First pass: collect all speaker IDs used in the script
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
+    # --- events --------------------------------------------------------------
 
-        # Check if line already has speaker format (Speaker 0, Speaker 1, etc.)
-        if line.startswith("Speaker ") and ":" in line:
-            match = re.match(r"^Speaker\s+(\d+)\s*:", line, re.IGNORECASE)
-            if match:
-                speaker_id = int(match.group(1))
-                speaker_ids_used.add(speaker_id)
+    def on_backend_change(self, data):
+        backend_id = data[self.backend]
+        spec = get(backend_id)
+        loaded = session.current and session.current.spec.id == backend_id
+        return [
+            gr.update(choices=variant_choices(spec),
+                      value=session.current.model_id if loaded else spec.default_variant.repo_id),
+            self._backend_info(backend_id),
+            gr.update(visible=spec.capabilities.lora, choices=lora_choices()),
+            *[gr.update(visible=sid == backend_id) for sid in self.param_groups],
+            *self._panel_updates(backend_id, data),
+        ]
 
-    # Create a mapping to re-index speakers to start at 0
-    if speaker_ids_used:
-        sorted_speakers = sorted(speaker_ids_used)
-        speaker_id_mapping = {old_id: new_id for new_id, old_id in enumerate(sorted_speakers)}
+    def on_load(self, data, progress=gr.Progress()):
+        global _last_log
+        spec = get(data[self.backend])
+        model_id = (data[self.variant] or spec.default_variant.repo_id).strip()
+        skip = [gr.update()] * (len(self._panel_outputs) + 1)
 
-        # Validate that we don't have more unique speakers than configured
-        if len(sorted_speakers) > num_speakers:
-            raise gr.Error(
-                f"Script uses {len(sorted_speakers)} unique speakers ({', '.join(f'Speaker {s}' for s in sorted_speakers)}) "
-                f"but only {num_speakers} speaker(s) configured. "
-                f"Please increase 'Number of Speakers' to at least {len(sorted_speakers)}."
-            )
-    else:
-        speaker_id_mapping = {}
+        if envs.status(spec) != "ready":
+            lines = []
 
-    # Second pass: reformat with re-indexed speaker IDs
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
+            def log(line):
+                lines.append(line)
+                progress(None, desc=line[-120:])
 
-        # Check if line already has speaker format (Speaker 0, Speaker 1, etc.)
-        if line.startswith("Speaker ") and ":" in line:
-            match = re.match(r"^Speaker\s+(\d+)\s*:\s*(.*)$", line, re.IGNORECASE)
-            if match:
-                old_speaker_id = int(match.group(1))
-                text_content = match.group(2)
-                new_speaker_id = speaker_id_mapping.get(old_speaker_id, old_speaker_id)
-                formatted_script_lines.append(f"Speaker {new_speaker_id}: {text_content}")
+            try:
+                envs.install(spec, log=log)
+            except Exception as e:
+                _last_log = "\n".join(lines[-200:])
+                raise gr.Error(f"Installing {spec.name} failed: {e}. See 'Worker log' for the install output.")
+            yield [f"Installed {spec.name}. Loading...", gr.update(choices=backend_choices(), value=spec.id), *skip[1:]]
+
+        options = {"lora_path": data[self.lora]} if data.get(self.lora) and spec.capabilities.lora else {}
+        try:
+            session.load(spec, model_id, data[self.device], options,
+                         lambda v, d: progress(v, desc=d or f"Loading {spec.name}..."))
+        except WorkerError as e:
+            _last_log = e.details
+            raise gr.Error(f"Could not load {model_id}: {e}. See 'Worker log' for details.")
+        except Exception as e:
+            raise gr.Error(str(e))
+        gr.Success(f"{spec.name} loaded")
+        yield [model_status(), gr.update(), *self._panel_updates(spec.id, data)]
+
+    def on_unload(self, data):
+        session.unload()
+        return [model_status(), *self._panel_updates(data[self.backend], data)]
+
+    def on_stop(self):
+        if session.current is None:
+            return model_status()
+        session.cancel()
+        session.unload()
+        gr.Info("Stopped. The model was unloaded; load it again to continue.")
+        return model_status()
+
+    def _voice_for(self, spk, data, caps, index):
+        src = data[spk["source"]]
+        label = f"speaker {index + 1}" if (data.get(self.num_speakers) or 1) > 1 else "the voice"
+        if src == PRESET:
+            if not data[spk["preset"]]:
+                raise gr.Error(f"Pick a preset for {label}")
+            return {"preset": data[spk["preset"]]}
+        if src in (LIBRARY, UPLOAD):
+            if src == LIBRARY:
+                name = data[spk["library"]]
+                if not name:
+                    raise gr.Error(f"Pick a library voice for {label} (add some on the Voices tab)")
+                audio, transcript = str(voice_library.audio_path(name)), voice_library.transcript(name)
             else:
-                formatted_script_lines.append(line)
-        else:
-            # Auto-assign to speakers in rotation (0-indexed like gradio_demo.py)
-            speaker_id = len(formatted_script_lines) % num_speakers
-            formatted_script_lines.append(f"Speaker {speaker_id}: {line}")
+                audio, transcript = data[spk["upload"]], (data[spk["transcript"]] or "").strip()
+                if not audio:
+                    raise gr.Error(f"Upload a reference clip for {label}")
+            if not transcript and caps["clone_needs_transcript"]:
+                from ovl import asr
 
-    formatted_script = "\n".join(formatted_script_lines)
+                gr.Info("Transcribing the reference clip with Whisper...")
+                transcript = asr.transcribe(audio)
+                asr.unload()
+                if src == LIBRARY:
+                    voice_library.set_transcript(name, transcript)
+            return {"audio": audio, "transcript": transcript or None}
+        if src == DESIGN:
+            if not (data[spk["design"]] or "").strip():
+                raise gr.Error(f"Describe the voice for {label}")
+            return {"description": data[spk["design"]].strip()}
+        return {}
 
-    # Load voice samples when voice cloning is enabled (similar to gradio_demo.py lines 257-267)
-    voice_samples = None
-    if enable_voice_cloning:
-        voice_samples = []
-        for speaker_name in selected_speakers:
-            audio_path = voice_mapper.get_voice_path(speaker_name)
-            # Read audio with same preprocessing as gradio_demo.py
-            wav, sr = sf.read(audio_path)
-            if len(wav.shape) > 1:
-                wav = np.mean(wav, axis=1)
-            if sr != 24000:
-                wav = librosa.resample(wav, orig_sr=sr, target_sr=24000)
-            voice_samples.append(wav)
+    def on_generate(self, data, progress=gr.Progress()):
+        global _last_log
+        model = session.current
+        backend_id = data[self.backend]
+        if model is None or model.spec.id != backend_id:
+            raise gr.Error(f"Load {get(backend_id).name} first")
+        text = (data[self.text] or "").strip()
+        if not text:
+            raise gr.Error("Enter some text")
 
-    status_speakers = (
-        f"Using {num_speakers} speaker(s): {', '.join(selected_speakers)}"
-        if enable_voice_cloning
-        else "Voice cloning disabled"
-    )
+        caps = current_caps(backend_id)
+        n = min(int(data[self.num_speakers] or 1), caps["max_speakers"] or 1)
+        voices = [self._voice_for(spk, data, caps, i) for i, spk in enumerate(self.speakers[:n])] if voice_sources(caps) else []
+        params = {name: data[comp] for sid, name, comp in self.param_inputs if sid == backend_id}
+        languages = caps["languages"]
+        language = data[self.language] if data[self.language] in languages else (languages[0] if languages else None)
+        seed = int(data[self.seed]) if data[self.seed] is not None and data[self.seed] >= 0 else None
 
-    # Generate output path
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = "outputs"
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, f"generated_{timestamp}.wav")
-
-    # Wrapper for Gradio progress.tqdm to ignore unsupported kwargs
-    class GradioTqdmWrapper:
-        def __call__(self, iterable, desc=None, **kwargs):
-            # Only pass supported arguments to Gradio's tqdm
-            return progress.tqdm(iterable, desc=desc)
-
-    # Generate using the same approach as gradio_demo.py
-    result = model.generate(
-        text=formatted_script,
-        voice_samples=voice_samples,
-        output_path=output_path,
-        cfg_scale=cfg_scale,
-        enable_voice_cloning=enable_voice_cloning,
-        progress_callback=GradioTqdmWrapper(),
-    )
-
-    status = f"""✓ Generated successfully
-{status_speakers}
-Duration: {result.audio_duration:.2f}s
-Generation time: {result.generation_time:.2f}s
-RTF: {result.rtf:.2f}x"""
-
-    return result.audio_path, status
-
-
-def toggle_voice_selection(enable_cloning):
-    """Show/hide voice selection based on voice cloning checkbox"""
-    return gr.update(visible=enable_cloning)
-
-
-def update_speaker_visibility(num_speakers):
-    """Show/hide speaker dropdowns based on number of speakers"""
-    updates = []
-    for i in range(4):
-        updates.append(gr.update(visible=(i < num_speakers)))
-    return updates
-
-
-def refresh_voices():
-    """Refresh voice list for standard model"""
-    voice_mapper.refresh()
-    voices = voice_mapper.list_voices()
-    return (
-        gr.update(choices=voices, value=voices[0] if voices else None),
-        gr.update(choices=voices, value=voices[1] if len(voices) > 1 else None),
-        gr.update(choices=voices, value=voices[2] if len(voices) > 2 else None),
-        gr.update(choices=voices, value=voices[3] if len(voices) > 3 else None),
-    )
-
-
-def refresh_streaming_voices():
-    """Refresh voice list for streaming model"""
-    streaming_voice_mapper.refresh()
-    voices = streaming_voice_mapper.list_voices()
-    return gr.update(choices=voices, value=voices[0] if voices else None)
-
-
-with gr.Blocks() as inference_tab:
-    gr.Markdown("# VibeVoice Inference")
-
-    with gr.Row():
-        with gr.Column(scale=1):
-            gr.Markdown("### Model Settings")
-            model_path = gr.Textbox(
-                label="Model Path",
-                value="vibevoice/VibeVoice-1.5B",
-                placeholder="HuggingFace model ID or local path (auto-detects model type)",
+        try:
+            result = session.generate(
+                text,
+                voices,
+                language=language if len(languages) > 1 else None,
+                instruct=((data[self.instruct] or "").strip() or None) if caps["instruct"] else None,
+                seed=seed,
+                params=params,
+                on_progress=lambda v, d: progress(v, desc=d or "Generating..."),
             )
-            gr.Markdown(
-                "*Tip: Use `vibevoice/VibeVoice-1.5B` for standard model or "
-                "`vibevoice/VibeVoice-Realtime-0.5B` for streaming model*",
-                elem_classes=["info-text"]
+        except WorkerError as e:
+            _last_log = e.details
+            raise gr.Error(f"{e}. See 'Worker log' for details.")
+        except Exception as e:
+            raise gr.Error(str(e))
+
+        speed = result.duration / result.generation_time if result.generation_time else 0
+        extra = " · ".join(f"{k}: {v}" for k, v in result.metrics.items())
+        metrics = f"{result.duration:.1f}s of audio in {result.generation_time:.1f}s ({speed:.1f}× realtime)" + (
+            f" · {extra}" if extra else ""
+        )
+        history = [
+            {"time": datetime.now().strftime("%H:%M:%S"), "model": model.spec.name, "text": text,
+             "duration": result.duration, "path": result.audio_path},
+            *data[self.history],
+        ][:50]
+        return result.audio_path, metrics, history, self._history_rows(history)
+
+    @staticmethod
+    def _history_rows(history):
+        return [[h["time"], h["model"], h["text"][:80] + ("…" if len(h["text"]) > 80 else ""),
+                 f"{h['duration']:.1f}s"] for h in history]
+
+    @staticmethod
+    def on_history_select(history, evt: gr.SelectData):
+        row = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
+        return history[row]["path"] if 0 <= row < len(history) else gr.update()
+
+    @staticmethod
+    def worker_log():
+        if session.current is not None:
+            return session.current.client.recent_log(300)
+        return _last_log
+
+    def _wire(self, demo):
+        panel_in = self._panel_inputs()
+        self.backend.change(
+            self.on_backend_change,
+            panel_in,
+            [self.variant, self.backend_info, self.lora, *self.param_groups.values(), *self._panel_outputs],
+        )
+        # .input/.release fire only on user interaction, so the updates above don't
+        # re-trigger these with the previous model's values.
+        for spk in self.speakers:
+            spk["source"].input(
+                lambda data: self._panel_updates(data[self.backend], data), panel_in, self._panel_outputs
             )
-            device = gr.Radio(
-                label="Device",
-                choices=get_available_devices(),
-                value=get_default_device(),
-            )
+        self.num_speakers.release(lambda data: self._panel_updates(data[self.backend], data), panel_in, self._panel_outputs)
 
-            # Standard model options
-            load_lora = gr.Checkbox(label="Load LoRA Adapter (Standard model only)", value=False)
-            with gr.Row(visible=False) as lora_row:
-                lora_path = gr.Textbox(
-                    label="LoRA Path",
-                    placeholder="Path to LoRA adapter or HuggingFace repo",
-                    scale=1,
-                )
+        load_inputs = panel_in | {self.variant, self.device, self.lora}
+        self.load_btn.click(
+            self.on_load, load_inputs, [self.status, self.backend, *self._panel_outputs], concurrency_id="model"
+        ).then(self.worker_log, None, self.log)
+        self.unload_btn.click(self.on_unload, panel_in, [self.status, *self._panel_outputs], concurrency_id="model")
 
-            # Streaming model options
-            with gr.Row(visible=False) as ddpm_row:
-                ddpm_steps = gr.Slider(
-                    label="DDPM Steps (Streaming model)",
-                    minimum=1,
-                    maximum=20,
-                    value=5,
-                    step=1,
-                    info="Lower = faster, Higher = better quality"
-                )
+        gen_inputs = panel_in | {self.text, self.instruct, self.seed, self.history,
+                                 *[spk[f] for spk in self.speakers for f in ("upload", "transcript", "design")],
+                                 *[comp for _, _, comp in self.param_inputs]}
+        gen = self.generate_btn.click(
+            self.on_generate, gen_inputs, [self.output, self.metrics, self.history, self.history_table],
+            concurrency_id="model",
+        )
+        gen.then(self.worker_log, None, self.log)
+        self.stop_btn.click(self.on_stop, None, self.status, cancels=[gen])
+        self.history_table.select(self.on_history_select, self.history, self.output)
+        self.refresh_log.click(self.worker_log, None, self.log)
+        demo.load(lambda data: [model_status(), *self._panel_updates(data[self.backend], data)], panel_in,
+                  [self.status, *self._panel_outputs])
 
-            load_btn = gr.Button("Load Model", variant="primary")
-            model_status = gr.Textbox(label="Status", interactive=False)
 
-        with gr.Column(scale=2):
-            gr.Markdown("### Generate Speech")
-
-            # Number of speakers slider (standard model only)
-            with gr.Column(visible=True) as standard_options_row:
-                num_speakers = gr.Slider(
-                    minimum=1,
-                    maximum=4,
-                    value=1,
-                    step=1,
-                    label="Number of Speakers",
-                )
-
-            text_input = gr.Textbox(
-                label="Text",
-                placeholder="Enter text to synthesize...\n\nFor multi-speaker (standard model):\nSpeaker 0: Hello there!\nSpeaker 1: Hi! How are you?\n\nOr enter plain text and speakers will be auto-assigned.",
-                lines=8,
-            )
-
-            # Standard model voice options
-            enable_cloning = gr.Checkbox(label="Enable Voice Cloning", value=True, visible=True)
-
-            with gr.Column(visible=True) as standard_voice_row:
-                gr.Markdown("**Standard Voice Selection** (Speaker 0, Speaker 1, Speaker 2, Speaker 3)")
-                with gr.Row():
-                    voice_dropdown_1 = gr.Dropdown(
-                        label="Speaker 0",
-                        choices=voice_mapper.list_voices(),
-                        value=(voice_mapper.list_voices()[0] if voice_mapper.list_voices() else None),
-                        visible=True,
-                    )
-                    voice_dropdown_2 = gr.Dropdown(
-                        label="Speaker 1",
-                        choices=voice_mapper.list_voices(),
-                        value=(voice_mapper.list_voices()[1] if len(voice_mapper.list_voices()) > 1 else None),
-                        visible=False,
-                    )
-                with gr.Row():
-                    voice_dropdown_3 = gr.Dropdown(
-                        label="Speaker 2",
-                        choices=voice_mapper.list_voices(),
-                        value=(voice_mapper.list_voices()[2] if len(voice_mapper.list_voices()) > 2 else None),
-                        visible=False,
-                    )
-                    voice_dropdown_4 = gr.Dropdown(
-                        label="Speaker 3",
-                        choices=voice_mapper.list_voices(),
-                        value=(voice_mapper.list_voices()[3] if len(voice_mapper.list_voices()) > 3 else None),
-                        visible=False,
-                    )
-                refresh_btn = gr.Button("🔄 Refresh Voices", size="sm")
-
-            # Streaming model voice options
-            with gr.Column(visible=False) as streaming_voice_row:
-                gr.Markdown("**Streaming Voice Selection** (Pre-computed voice prompts)")
-                streaming_voice_dropdown = gr.Dropdown(
-                    label="Voice",
-                    choices=streaming_voice_mapper.list_voices(),
-                    value=(streaming_voice_mapper.list_voices()[0] if streaming_voice_mapper.list_voices() else None),
-                )
-                streaming_refresh_btn = gr.Button("🔄 Refresh Streaming Voices", size="sm")
-
-            cfg_scale = gr.Slider(label="CFG Scale", minimum=1.0, maximum=2.0, value=1.3, step=0.1)
-
-            generate_btn = gr.Button("Generate Speech", variant="primary", size="lg")
-
-            generation_status = gr.Textbox(label="Status", interactive=False)
-            output_audio = gr.Audio(label="Generated Audio", interactive=False)
-
-    # Event handlers
-    load_btn.click(
-        fn=toggle_model,
-        inputs=[model_path, device, load_lora, lora_path, ddpm_steps],
-        outputs=[
-            model_status,
-            load_btn,
-            model_path,
-            lora_path,
-            load_lora,
-            lora_path,
-            lora_row,
-            standard_voice_row,
-            streaming_voice_row,
-            enable_cloning,
-            ddpm_row,
-        ],
-    )
-
-    # Update speaker visibility when num_speakers changes
-    num_speakers.change(
-        fn=update_speaker_visibility,
-        inputs=[num_speakers],
-        outputs=[voice_dropdown_1, voice_dropdown_2, voice_dropdown_3, voice_dropdown_4],
-    )
-
-    generate_btn.click(
-        fn=generate_speech,
-        inputs=[
-            num_speakers,
-            text_input,
-            voice_dropdown_1,
-            voice_dropdown_2,
-            voice_dropdown_3,
-            voice_dropdown_4,
-            streaming_voice_dropdown,
-            cfg_scale,
-            enable_cloning,
-        ],
-        outputs=[output_audio, generation_status],
-    )
-
-    refresh_btn.click(
-        fn=refresh_voices,
-        inputs=[],
-        outputs=[voice_dropdown_1, voice_dropdown_2, voice_dropdown_3, voice_dropdown_4],
-    )
-
-    streaming_refresh_btn.click(
-        fn=refresh_streaming_voices,
-        inputs=[],
-        outputs=[streaming_voice_dropdown],
-    )
-
-    enable_cloning.change(fn=toggle_voice_selection, inputs=[enable_cloning], outputs=[standard_voice_row])
-
-    load_lora.change(fn=toggle_lora_path, inputs=[load_lora], outputs=[lora_row])
-
-    # Initialize state on load
-    inference_tab.load(
-        fn=get_initial_state,
-        outputs=[
-            model_status,
-            load_btn,
-            model_path,
-            lora_path,
-            load_lora,
-            lora_path,
-            lora_row,
-            standard_voice_row,
-            streaming_voice_row,
-            enable_cloning,
-            ddpm_row,
-        ],
-    )
+def build(demo: gr.Blocks):
+    tab = GenerateTab()
+    tab.build(demo)
+    return tab

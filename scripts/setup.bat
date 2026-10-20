@@ -1,60 +1,45 @@
 @echo off
-setlocal enabledelayedexpansion
+REM Creates .\venv with the OpenVoiceLab app. Model environments are installed
+REM later, on demand, from the Models tab (or `openvoicelab install <model>`).
+setlocal
+cd /d "%~dp0\.."
 
 echo OpenVoiceLab Setup
-echo ====================
-echo.
+echo ==================
 
-REM Check Python version
-python --version >nul 2>&1
-if errorlevel 1 (
-    echo Python is not installed. Please install Python 3.9 or later.
-    pause
-    exit /b 1
-)
-
-for /f "tokens=2" %%i in ('python --version 2^>^&1') do set PYTHON_VERSION=%%i
-echo Found Python %PYTHON_VERSION%
-
-REM Create virtual environment
 if not exist "venv\" (
-    echo Creating virtual environment...
-    python -m venv venv
-) else (
-    echo Virtual environment already exists
+    where uv >nul 2>&1
+    if not errorlevel 1 (
+        echo Creating virtual environment with uv...
+        uv venv --seed --python 3.12 venv
+    ) else (
+        python --version >nul 2>&1
+        if errorlevel 1 (
+            echo Python 3.10+ is required ^(or install uv: https://docs.astral.sh/uv/^).
+            pause
+            exit /b 1
+        )
+        echo Creating virtual environment...
+        python -m venv venv
+    )
 )
+if errorlevel 1 goto :fail
 
-REM Activate virtual environment
-echo Activating virtual environment...
-call venv\Scripts\activate.bat
+echo Installing uv...
+venv\Scripts\python -m pip install --quiet --upgrade pip uv
+if errorlevel 1 goto :fail
 
-REM Upgrade pip
-echo Upgrading pip...
-python -m pip install --upgrade pip
-
-REM Install light-the-torch
-echo Installing light-the-torch...
-pip install light-the-torch
-
-REM Install PyTorch with optimal configuration
-echo Installing PyTorch with optimal configuration...
-ltt install torch torchvision torchaudio
-
-REM Install requirements
-echo Installing dependencies...
-pip install -r requirements.txt
-
-REM Create necessary directories
-echo Creating directories...
-if not exist "data\" mkdir data
-if not exist "logs\" mkdir logs
-if not exist "training_runs\" mkdir training_runs
+echo Installing OpenVoiceLab...
+REM --torch-backend=auto picks the right PyTorch build for your GPU (CUDA or CPU).
+venv\Scripts\uv pip install --python venv\Scripts\python.exe --torch-backend=auto -e .
+if errorlevel 1 goto :fail
 
 echo.
-echo Setup complete!
-echo.
-echo To get started:
-echo   1. Activate the environment: venv\Scripts\activate
-echo   2. Run the app: python -m ovl.cli
-echo.
+echo Setup complete! Start the app with: scripts\run.bat
 pause
+exit /b 0
+
+:fail
+echo Setup failed.
+pause
+exit /b 1

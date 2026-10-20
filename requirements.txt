@@ -1,12 +1,20 @@
-vibevoice @ git+https://github.com/vibevoice-community/VibeVoice/
-rich
-gradio
-torch
-torchaudio
-torchcodec
-click
-tensorboardX
-silero_vad
-librosa
-soundfile
-peft==0.17.0
+# Core UI environment. Each TTS model family is installed into its own isolated
+# environment on demand (see ovl/backends/catalog/), so model-specific
+# dependencies don't belong here.
+gradio>=6.30,<7
+click>=8.1
+rich>=14
+uv>=0.13
+huggingface_hub>=1.16
+numpy>=2.0
+soundfile>=0.13
+soxr>=0.5
+
+# Dataset builder (VAD + Whisper transcription)
+torch>=2.8
+transformers>=5.17
+accelerate>=1.10
+silero-vad>=6.2
+
+# Training dashboard
+tensorboard>=2.20

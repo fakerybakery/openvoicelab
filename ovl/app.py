@@ -1,65 +1,60 @@
 import platform
 
 import gradio as gr
-import torch
 
-from ovl import __version__
-from ovl.ui.data import data_tab
-from ovl.ui.inference import inference_tab
-from ovl.ui.settings import settings_tab
-from ovl.ui.training import training_tab
-from ovl.ui.voices import voices_tab
+from ovl import __version__, paths
 from ovl.utils import setup_logging
 
-setup_logging(level="INFO", log_file="logs/openvoicelab.log")
+CSS = """
+.ovl-footer { text-align: center; opacity: 0.6; font-size: 0.85em; margin-top: 12px; }
+"""
 
 
-def get_system_info():
-    """Get system information for footer"""
-    info_parts = [f"OpenVoiceLab v{__version__}"]
+def system_info() -> str:
+    import torch
 
-    # Detect available devices
     devices = []
     if torch.cuda.is_available():
-        cuda_name = torch.cuda.get_device_name(0)
-        devices.append(f"CUDA ({cuda_name})")
+        devices.append(f"CUDA ({torch.cuda.get_device_name(0)})")
     if torch.backends.mps.is_available():
-        devices.append("MPS")
-    if not devices:
-        devices.append("CPU")
-
-    info_parts.append(f"Devices: {', '.join(devices)}")
-
-    # Python version
-    python_version = platform.python_version()
-    info_parts.append(f"Python {python_version}")
-
-    # PyTorch version
-    torch_version = torch.__version__
-    info_parts.append(f"PyTorch {torch_version}")
-
-    return " • ".join(info_parts)
+        devices.append("Apple MPS")
+    devices.append("CPU")
+    return f"OpenVoiceLab v{__version__} · {', '.join(devices)} · Python {platform.python_version()} · data in {paths.home()}"
 
 
-with gr.Blocks() as app:
-    gr.TabbedInterface(
-        [
-            inference_tab,
-            voices_tab,
-            data_tab,
-            training_tab,
-            settings_tab,
-        ],
-        [
-            "Inference",
-            "Voices",
-            "Data",
-            "Training",
-            "Settings",
-        ],
-    )
+def create_app() -> gr.Blocks:
+    from ovl.ui import data, inference, models, training, voices
 
-    gr.Markdown(
-        f"<div style='text-align: center; margin-top: 20px; padding: 10px; opacity: 0.6; font-size: 0.9em;'>{get_system_info()}</div>",
-        elem_classes="version-footer",
+    with gr.Blocks(title="OpenVoiceLab", analytics_enabled=False) as app:
+        gr.Markdown("# OpenVoiceLab")
+        with gr.Tabs():
+            with gr.Tab("Generate"):
+                inference.build(app)
+            with gr.Tab("Voices"):
+                voices.build(app)
+            with gr.Tab("Models"):
+                models.build(app)
+            with gr.Tab("Data"):
+                data.build(app)
+            with gr.Tab("Training"):
+                training.build(app)
+        gr.Markdown(system_info(), elem_classes="ovl-footer")
+    return app
+
+
+def launch(**kwargs):
+    import atexit
+
+    from ovl.runtime.session import session
+
+    setup_logging(level="DEBUG" if kwargs.get("debug") else "INFO", log_file=str(paths.logs_dir() / "openvoicelab.log"))
+    atexit.register(session.unload)
+    app = create_app()
+    app.queue(default_concurrency_limit=1)
+    app.launch(
+        theme=gr.themes.Soft(primary_hue="indigo"),
+        css=CSS,
+        footer_links=["gradio", "settings"],
+        allowed_paths=[str(paths.home())],
+        **kwargs,
     )

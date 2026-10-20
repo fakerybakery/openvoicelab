@@ -1,7 +1,6 @@
-#!/usr/bin/env python3
-"""Training script for VibeVoice fine-tuning - runs in background process"""
+"""Kept for backwards compatibility; training now runs `python -m vibevoice.finetune.train_vibevoice`
+inside the VibeVoice environment (see trainer.py)."""
 
-# Import and run the official VibeVoice training script
 from vibevoice.finetune.train_vibevoice import main
 
 if __name__ == "__main__":

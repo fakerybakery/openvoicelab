@@ -218,9 +218,14 @@ __marimo__/
 # Claude
 .claude/
 
-# OVL
+# OVL: app data under OVL_HOME (the repo root by default). Anchored so the
+# ovl/data and ovl/voices packages aren't ignored.
 READONLY-*/
 INTERNAL-*
-training_runs/
 test_audio/
-outputs/
+/data/
+/envs/
+/logs/
+/outputs/
+/training_runs/
+/voices/

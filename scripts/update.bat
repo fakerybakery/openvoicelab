@@ -1,10 +1,7 @@
 @echo off
+cd /d "%~dp0\.."
 
 echo Updating OpenVoiceLab...
-echo.
-
-REM Pull latest changes from repository
-echo Pulling latest changes from repository...
 git pull
 if errorlevel 1 (
     echo Failed to pull updates. Please check your git configuration.
@@ -12,34 +9,20 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM Check if venv exists
 if not exist "venv\" (
-    echo Virtual environment not found. Please run setup.bat first.
+    echo Virtual environment not found. Run scripts\setup.bat first.
     pause
     exit /b 1
 )
 
-REM Activate virtual environment
-call venv\Scripts\activate.bat
-
-REM Upgrade pip
-echo Upgrading pip...
-python -m pip install --upgrade pip
-
-REM Update light-the-torch
-echo Updating light-the-torch...
-pip install --upgrade light-the-torch
-
-REM Update PyTorch with optimal configuration
-echo Updating PyTorch...
-ltt install --upgrade torch torchvision torchaudio
-
-REM Update requirements
-echo Updating dependencies...
-pip install --upgrade -r requirements.txt
+venv\Scripts\python -m pip install --quiet --upgrade pip uv
+venv\Scripts\uv pip install --python venv\Scripts\python.exe --torch-backend=auto --upgrade -e .
+if errorlevel 1 (
+    echo Update failed.
+    pause
+    exit /b 1
+)
 
 echo.
-echo Update complete!
-echo.
+echo Update complete! Installed models are refreshed automatically when their requirements change.
 pause
-

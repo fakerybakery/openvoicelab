@@ -1,55 +1,31 @@
 #!/bin/bash
+# Creates ./venv with the OpenVoiceLab app. Model environments are installed
+# later, on demand, from the Models tab (or `openvoicelab install <model>`).
 set -e
+cd "$(dirname "$0")/.."
 
 echo "OpenVoiceLab Setup"
-echo "===================="
-echo ""
+echo "=================="
 
-# Check Python version
-if ! command -v python3 &> /dev/null; then
-    echo "Python 3 is not installed. Please install Python 3.9 or later."
-    exit 1
-fi
-
-PYTHON_VERSION=$(python3 --version | cut -d' ' -f2 | cut -d'.' -f1,2)
-echo "Found Python $PYTHON_VERSION"
-
-# Create virtual environment
 if [ ! -d "venv" ]; then
-    echo "Creating virtual environment..."
-    python3 -m venv venv
-else
-    echo "Virtual environment already exists"
+    if command -v uv &> /dev/null; then
+        echo "Creating virtual environment with uv..."
+        uv venv --seed --python 3.12 venv
+    elif command -v python3 &> /dev/null; then
+        echo "Creating virtual environment with $(python3 --version)..."
+        python3 -m venv venv
+    else
+        echo "Python 3.10+ is required (or install uv: https://docs.astral.sh/uv/)."
+        exit 1
+    fi
 fi
 
-# Activate virtual environment
-echo "Activating virtual environment..."
-source venv/bin/activate
+echo "Installing uv..."
+venv/bin/python -m pip install --quiet --upgrade pip uv
 
-# Upgrade pip
-echo "Upgrading pip..."
-pip install --upgrade pip
-
-# Install light-the-torch
-echo "Installing light-the-torch..."
-pip install light-the-torch
-
-# Install PyTorch with optimal configuration
-echo "Installing PyTorch with optimal configuration..."
-ltt install torch torchvision torchaudio
-
-# Install requirements
-echo "Installing dependencies..."
-pip install -r requirements.txt
-
-# Create necessary directories
-echo "Creating directories..."
-mkdir -p data logs training_runs
+echo "Installing OpenVoiceLab..."
+# --torch-backend=auto picks the right PyTorch build for your GPU (CUDA, ROCm or CPU).
+venv/bin/uv pip install --python venv/bin/python --torch-backend=auto -e .
 
 echo ""
-echo "Setup complete!"
-echo ""
-echo "To get started:"
-echo "  1. Activate the environment: source venv/bin/activate"
-echo "  2. Run the app: python -m ovl.cli"
-echo ""
+echo "Setup complete! Start the app with: scripts/run.sh"

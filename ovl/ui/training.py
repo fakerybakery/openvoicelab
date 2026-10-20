@@ -1,223 +1,143 @@
+"""Training tab: LoRA fine-tuning for VibeVoice."""
+
 import gradio as gr
 
-from ovl.data import DatasetBuilder
 from ovl.training import TrainingManager
 from ovl.training.trainer import TrainingConfig
+from ovl.ui.data import dataset_builder
 
-# Global state
 training_manager = TrainingManager()
-dataset_builder = DatasetBuilder()
+
+
+def dataset_choices():
+    return [(f"{ds['name']} ({ds['num_samples']} clips)", ds["path"]) for ds in dataset_builder.list_datasets()]
 
 
 def refresh_datasets():
-    """Refresh available datasets"""
-    datasets = dataset_builder.list_datasets()
-    if not datasets:
-        return gr.update(choices=[], value=None)
-
-    choices = [f"{ds['name']} ({ds['num_samples']} samples)" for ds in datasets]
-    return gr.update(choices=choices, value=choices[0] if choices else None)
+    choices = dataset_choices()
+    return gr.update(choices=choices, value=choices[0][1] if choices else None)
 
 
-def refresh_runs():
-    """Refresh training runs list"""
+def runs_markdown() -> str:
     runs = training_manager.list_runs()
-
     if not runs:
-        return gr.update(value="No training runs yet")
-
-    runs_text = "## Training Runs\n\n"
+        return "No training runs yet."
+    lines = []
     for run in runs:
-        status_emoji = "🟢" if run["status"] == "running" else "⚫"
-        runs_text += f"{status_emoji} **{run['run_id']}**\n"
-        runs_text += f"- Created: {run['created_at']}\n"
-        runs_text += f"- Status: {run['status']}\n"
-        runs_text += f"- Dataset: {run['config']['dataset_path']}\n\n"
+        icon = {"running": "🟢", "finished": "✅"}.get(run["status"], "⚫")
+        cfg = run.get("config", {})
+        lines.append(f"{icon} **{run['run_id']}**: {run['status']} · {cfg.get('model_path', '')} on "
+                     f"`{cfg.get('dataset_path', '')}`")
+        if run.get("lora_path"):
+            lines.append(f"  - LoRA: `{run['lora_path']}` (pick it on the Generate tab)")
+    return "\n".join(lines)
 
-    return gr.update(value=runs_text)
+
+def hardware_note() -> str:
+    import torch
+
+    if torch.cuda.is_available():
+        return ""
+    return ("⚠️ No NVIDIA GPU detected. VibeVoice fine-tuning is designed for CUDA GPUs (≈16 GB+ VRAM for 1.5B); "
+            "on other hardware it will be very slow or fail.")
 
 
-def start_training(
-    dataset_choice,
-    model_path,
-    num_epochs,
-    batch_size,
-    gradient_accumulation_steps,
-    learning_rate,
-    lora_r,
-    voice_prompt_drop_rate,
-    progress=gr.Progress(),
-):
-    """Start training"""
-    if not dataset_choice:
-        raise gr.Error("Please select a dataset")
+def start_training(dataset_path, model_path, num_epochs, batch_size, grad_accum, learning_rate, lora_r,
+                   voice_prompt_drop_rate, gradient_checkpointing):
+    if not dataset_path:
+        raise gr.Error("Select a dataset (build one on the Data tab)")
+    import torch
 
-    # Extract dataset name from choice
-    dataset_name = dataset_choice.split(" (")[0]
-    dataset_path = f"data/{dataset_name}"
-
-    if not model_path:
-        raise gr.Error("Please provide model path")
-
-    gradient_accumulation_steps = int(gradient_accumulation_steps)
-
-    # Create config
     config = TrainingConfig(
         model_path=model_path,
         dataset_path=dataset_path,
-        output_dir=f"training_runs/output_{dataset_name}",
-        num_epochs=num_epochs,
-        batch_size=batch_size,
-        gradient_accumulation_steps=gradient_accumulation_steps,
-        learning_rate=learning_rate,
-        lora_r=lora_r,
-        voice_prompt_drop_rate=voice_prompt_drop_rate,
+        num_epochs=int(num_epochs),
+        batch_size=int(batch_size),
+        gradient_accumulation_steps=int(grad_accum),
+        learning_rate=float(learning_rate),
+        lora_r=int(lora_r),
+        lora_alpha=int(lora_r) * 4,
+        voice_prompt_drop_rate=float(voice_prompt_drop_rate),
+        gradient_checkpointing=bool(gradient_checkpointing),
+        bf16=torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
     )
-
     try:
         run_id = training_manager.start_training(config)
-
-        return (
-            gr.update(value=f"✅ Training started: {run_id}\n\nWaiting for TensorBoard..."),
-            gr.update(value="<p>Waiting for TensorBoard to start... Click Refresh TensorBoard in a few seconds.</p>"),
-            refresh_runs(),
-        )
     except Exception as e:
-        raise gr.Error(f"Failed to start training: {str(e)}")
+        raise gr.Error(f"Failed to start training: {e}")
+    gr.Success(f"Training started: {run_id}")
+    return f"Training **{run_id}**. TensorBoard will appear below once the first metrics are logged.", runs_markdown()
 
 
 def stop_training():
-    """Stop current training"""
     active = training_manager.get_active_run()
     if not active:
-        raise gr.Error("No active training to stop")
-
+        raise gr.Error("No training is running")
     training_manager.stop_training(active["run_id"])
+    return f"Stopped {active['run_id']}", runs_markdown()
 
-    return (gr.update(value=f"⏹️ Training stopped: {active['run_id']}"), refresh_runs())
 
-
-def view_tensorboard():
-    """Load TensorBoard for active run"""
-    active = training_manager.get_active_run()
-    if not active:
-        return gr.update(value="<p>No active training run</p>")
-
-    # Check if TensorBoard is actually running
-    if not training_manager.is_tensorboard_ready(active["run_id"]):
-        return gr.update(value="<p>TensorBoard is starting... Please wait a few more seconds and refresh.</p>")
-
-    tb_url = training_manager.get_tensorboard_url(active["run_id"])
-    return gr.update(value=f'<iframe src="{tb_url}" width="100%" height="800px"></iframe>')
+def tensorboard_html():
+    url = training_manager.ensure_tensorboard()
+    if not training_manager.is_tensorboard_ready():
+        return "<p>TensorBoard is starting... refresh in a few seconds.</p>"
+    return f'<iframe src="{url}" width="100%" height="720px" style="border:0"></iframe>'
 
 
 def view_logs():
-    """View training logs"""
-    active = training_manager.get_active_run()
-    if not active:
-        return "No active training run"
-
-    logs = training_manager.get_training_log(active["run_id"])
-    return logs
+    active = training_manager.get_active_run() or next(iter(training_manager.list_runs()), None)
+    return training_manager.get_training_log(active["run_id"]) if active else ""
 
 
-with gr.Blocks() as training_tab:
-    gr.Markdown("# Training")
-    gr.Markdown("Fine-tune VibeVoice on your datasets")
-
+def build(demo: gr.Blocks):
+    gr.Markdown("Fine-tune VibeVoice on a dataset from the **Data** tab. The result is a LoRA adapter you can load "
+                "on the **Generate** tab. Training runs in the VibeVoice environment, so install it on the **Models** tab first.")
+    note = gr.Markdown()
     with gr.Row():
         with gr.Column(scale=1):
-            gr.Markdown("### Configuration")
-
-            dataset_dropdown = gr.Dropdown(label="Dataset", choices=[], info="Select dataset to train on")
-
-            refresh_datasets_btn = gr.Button("🔄 Refresh Datasets", size="sm")
-
-            model_path = gr.Textbox(
-                label="Model Path",
+            dataset = gr.Dropdown(label="Dataset", choices=dataset_choices())
+            refresh_ds = gr.Button("Refresh datasets", size="sm")
+            model_path = gr.Dropdown(
+                ["vibevoice/VibeVoice-1.5B", "vibevoice/VibeVoice-7B"],
                 value="vibevoice/VibeVoice-1.5B",
-                info="HuggingFace model ID or local path",
+                label="Base model",
+                allow_custom_value=True,
             )
-
-            with gr.Accordion("Training Parameters", open=False):
-                num_epochs = gr.Slider(label="Epochs", minimum=1, maximum=20, value=3, step=1)
-
-                batch_size = gr.Slider(label="Batch Size", minimum=1, maximum=16, value=8, step=1,
-                                      info="Official recommendation: 8")
-
-                gradient_accumulation = gr.Slider(
-                    label="Gradient Accumulation Steps",
-                    minimum=1,
-                    maximum=128,
-                    value=1,
-                    step=1,
-                    info="Accumulate gradients across steps to simulate larger batches",
-                )
-
-                learning_rate = gr.Number(label="Learning Rate", value=2.5e-5, precision=6,
-                                         info="Official recommendation: 2.5e-5")
-
-                lora_r = gr.Slider(label="LoRA Rank (r)", minimum=4, maximum=64, value=8, step=4)
-
+            with gr.Accordion("Training parameters", open=False):
+                num_epochs = gr.Slider(1, 50, value=3, step=1, label="Epochs")
+                batch_size = gr.Slider(1, 16, value=8, step=1, label="Batch size", info="Official recommendation: 8")
+                grad_accum = gr.Slider(1, 64, value=1, step=1, label="Gradient accumulation steps")
+                learning_rate = gr.Number(label="Learning rate", value=2.5e-5)
+                lora_r = gr.Slider(4, 128, value=8, step=4, label="LoRA rank", info="alpha is set to 4× rank")
                 voice_prompt_drop_rate = gr.Slider(
-                    label="Voice Prompt Drop Rate",
-                    minimum=0.0,
-                    maximum=1.0,
-                    value=0.2,
-                    step=0.1,
-                    info="Default 0.2 for multi-speaker. Use 1.0 for single-speaker (disables voice cloning but improves naturalness)",
+                    0.0, 1.0, value=0.2, step=0.05, label="Voice prompt drop rate",
+                    info="0.2 keeps voice cloning working; 1.0 trains a single fixed voice (more natural, no cloning)",
                 )
-
+                gradient_checkpointing = gr.Checkbox(label="Gradient checkpointing", value=False,
+                                                     info="Saves memory at the cost of speed")
             with gr.Row():
-                start_btn = gr.Button("▶️ Start Training", variant="primary", size="lg")
-                stop_btn = gr.Button("⏹️ Stop Training", variant="stop", size="lg")
-
-            status_text = gr.Markdown("")
-
+                start_btn = gr.Button("Start training", variant="primary")
+                stop_btn = gr.Button("Stop", variant="stop")
+            status = gr.Markdown()
+            gr.Markdown("### Runs")
+            runs = gr.Markdown()
+            refresh_runs = gr.Button("Refresh runs", size="sm")
         with gr.Column(scale=2):
-            gr.Markdown("### TensorBoard")
+            tensorboard = gr.HTML("<p>Start a run to see TensorBoard.</p>")
+            refresh_tb = gr.Button("Show TensorBoard", size="sm")
+            with gr.Accordion("Training log", open=False):
+                logs = gr.Textbox(lines=20, max_lines=30, show_label=False, interactive=False, autoscroll=True)
+                refresh_logs = gr.Button("Refresh log", size="sm")
 
-            tensorboard_html = gr.HTML("<p>Start training to view TensorBoard</p>")
-            refresh_tb_btn = gr.Button("🔄 Refresh TensorBoard")
-
-            with gr.Accordion("Training Logs", open=False):
-                logs_text = gr.Textbox(label="Logs", lines=20, max_lines=30, interactive=False)
-                refresh_logs_btn = gr.Button("🔄 Refresh Logs")
-
-    with gr.Row():
-        gr.Markdown("### Training History")
-
-    with gr.Row():
-        runs_list = gr.Markdown("No training runs yet")
-        refresh_runs_btn = gr.Button("🔄 Refresh Runs")
-
-    # Event handlers
-    refresh_datasets_btn.click(fn=refresh_datasets, outputs=[dataset_dropdown])
-
+    refresh_ds.click(refresh_datasets, None, dataset)
     start_btn.click(
-        fn=start_training,
-        inputs=[
-            dataset_dropdown,
-            model_path,
-            num_epochs,
-            batch_size,
-            gradient_accumulation,
-            learning_rate,
-            lora_r,
-            voice_prompt_drop_rate,
-        ],
-        outputs=[status_text, tensorboard_html, runs_list],
+        start_training,
+        [dataset, model_path, num_epochs, batch_size, grad_accum, learning_rate, lora_r, voice_prompt_drop_rate,
+         gradient_checkpointing],
+        [status, runs],
     )
-
-    stop_btn.click(fn=stop_training, outputs=[status_text, runs_list])
-
-    refresh_tb_btn.click(fn=view_tensorboard, outputs=[tensorboard_html])
-
-    refresh_logs_btn.click(fn=view_logs, outputs=[logs_text])
-
-    refresh_runs_btn.click(fn=refresh_runs, outputs=[runs_list])
-
-    # Auto-load on tab load
-    training_tab.load(fn=refresh_datasets, outputs=[dataset_dropdown])
-
-    training_tab.load(fn=refresh_runs, outputs=[runs_list])
+    stop_btn.click(stop_training, None, [status, runs])
+    refresh_runs.click(runs_markdown, None, runs)
+    refresh_tb.click(tensorboard_html, None, tensorboard)
+    refresh_logs.click(view_logs, None, logs)
+    demo.load(lambda: (hardware_note(), refresh_datasets(), runs_markdown()), None, [note, dataset, runs])

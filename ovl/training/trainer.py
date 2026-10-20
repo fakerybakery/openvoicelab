@@ -1,29 +1,31 @@
-"""Training manager for VibeVoice fine-tuning with TensorBoard logging"""
+"""VibeVoice LoRA fine-tuning, run as a subprocess in the VibeVoice environment."""
 
 import json
 import logging
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
-from dataclasses import dataclass
+import time
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Dict, List, Optional
 
+from ovl import paths
 from ovl.training.data_utils import prepare_training_data
 
 logger = logging.getLogger(__name__)
 
+TENSORBOARD_PORT = 6006
+
 
 @dataclass
 class TrainingConfig:
-    """Configuration for training"""
-
     model_path: str
     dataset_path: str
-    output_dir: str
     num_epochs: int = 3
     batch_size: int = 8
     learning_rate: float = 2.5e-5
@@ -34,10 +36,8 @@ class TrainingConfig:
     bf16: bool = True
     save_steps: int = 500
     logging_steps: int = 10
-    eval_steps: int = 500
-    warmup_steps: int = 100
     voice_prompt_drop_rate: float = 0.2
-    # Critical parameters from official training example
+    # Defaults from the official VibeVoice finetuning example.
     train_diffusion_head: bool = True
     gradient_clipping: bool = True
     ddpm_batch_mul: int = 4
@@ -50,340 +50,182 @@ class TrainingConfig:
     gradient_accumulation_steps: int = 1
 
 
+def _pid_alive(pid: int) -> bool:
+    if os.name == "nt":
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True).stdout
+        return str(pid) in out
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
 class TrainingManager:
-    """Manages training processes"""
-
-    def __init__(self, runs_dir: str = "training_runs"):
-        self.runs_dir = Path(runs_dir)
+    def __init__(self, runs_dir: Optional[str] = None):
+        self.runs_dir = Path(runs_dir) if runs_dir else paths.runs_dir()
         self.runs_dir.mkdir(parents=True, exist_ok=True)
-        self.state_file = self.runs_dir / "state.json"
-        self.tensorboard_process = None
-        self.training_process = None
+        self.tensorboard_process: Optional[subprocess.Popen] = None
+        self._processes: Dict[str, subprocess.Popen] = {}
 
-    def _load_state(self) -> Dict[str, Any]:
-        """Load training state"""
-        if self.state_file.exists():
-            return json.loads(self.state_file.read_text())
-        return {}
+    def _run_info(self, run_dir: Path) -> Optional[Dict[str, Any]]:
+        info_file = run_dir / "info.json"
+        if not info_file.exists():
+            return None
+        info = json.loads(info_file.read_text())
+        info["run_id"] = run_dir.name
+        info["run_dir"] = str(run_dir)
+        pid_file = run_dir / "train.pid"
+        running = pid_file.exists() and _pid_alive(int(pid_file.read_text().strip()))
+        info["status"] = "running" if running else info.get("final_status", "stopped")
+        lora = run_dir / "checkpoints" / "lora"
+        info["lora_path"] = str(lora) if lora.is_dir() else None
+        return info
 
-    def _save_state(self, state: Dict[str, Any]):
-        """Save training state"""
-        self.state_file.write_text(json.dumps(state, indent=2))
+    def list_runs(self) -> List[Dict[str, Any]]:
+        runs = (self._run_info(d) for d in sorted(self.runs_dir.iterdir(), reverse=True) if d.name.startswith("run_"))
+        return [r for r in runs if r]
 
     def get_active_run(self) -> Optional[Dict[str, Any]]:
-        """Get currently active training run"""
-        state = self._load_state()
-        if state.get("active_run"):
-            run_id = state["active_run"]
-            run_dir = self.runs_dir / run_id
-            if run_dir.exists():
-                info_file = run_dir / "info.json"
-                if info_file.exists():
-                    info = json.loads(info_file.read_text())
-                    info["run_id"] = run_id
-                    info["run_dir"] = str(run_dir)
+        return next((r for r in self.list_runs() if r["status"] == "running"), None)
 
-                    # Check if process is still running
-                    pid_file = run_dir / "train.pid"
-                    if pid_file.exists():
-                        pid = int(pid_file.read_text().strip())
-                        try:
-                            os.kill(pid, 0)  # Check if process exists
-                            info["status"] = "running"
-                        except OSError:
-                            info["status"] = "stopped"
-                    else:
-                        info["status"] = "stopped"
+    def start_training(self, config: TrainingConfig) -> str:
+        from ovl.backends import get
+        from ovl.runtime import envs
 
-                    return info
-        return None
+        if self.get_active_run():
+            raise RuntimeError("A training run is already in progress")
+        spec = get("vibevoice")
+        if envs.status(spec) != "ready":
+            raise RuntimeError("Install VibeVoice on the Models tab first; training runs in its environment.")
 
-    def list_runs(self) -> list[Dict[str, Any]]:
-        """List all training runs"""
-        runs = []
-        for run_dir in sorted(self.runs_dir.iterdir(), reverse=True):
-            if run_dir.is_dir() and run_dir.name.startswith("run_"):
-                info_file = run_dir / "info.json"
-                if info_file.exists():
-                    info = json.loads(info_file.read_text())
-                    info["run_id"] = run_dir.name
-
-                    # Check if process is still running
-                    pid_file = run_dir / "train.pid"
-                    if pid_file.exists():
-                        pid = int(pid_file.read_text().strip())
-                        try:
-                            os.kill(pid, 0)
-                            info["status"] = "running"
-                        except OSError:
-                            info["status"] = "stopped"
-                    else:
-                        info["status"] = "stopped"
-
-                    runs.append(info)
-        return runs
-
-    def start_training(self, config: TrainingConfig, progress_callback: Optional[Callable] = None) -> str:
-        """Start training in background process"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_id = f"run_{timestamp}"
+        jsonl_path = prepare_training_data(config.dataset_path)
+        run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         run_dir = self.runs_dir / run_id
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-        logger.info(f"Starting training run: {run_id}")
-        logger.info(f"Model: {config.model_path}, Dataset: {config.dataset_path}")
-        info = {
-            "created_at": datetime.now().isoformat(),
-            "config": {
-                "model_path": config.model_path,
-                "dataset_path": config.dataset_path,
-                "output_dir": config.output_dir,
-                "num_epochs": config.num_epochs,
-                "batch_size": config.batch_size,
-                "learning_rate": config.learning_rate,
-                "lora_r": config.lora_r,
-                "lora_alpha": config.lora_alpha,
-                "voice_prompt_drop_rate": config.voice_prompt_drop_rate,
-            },
-        }
-        (run_dir / "info.json").write_text(json.dumps(info, indent=2))
-
-        # Prepare training script arguments
         output_dir = run_dir / "checkpoints"
-        output_dir.mkdir(exist_ok=True)
+        log_dir = run_dir / "logs"
+        output_dir.mkdir(parents=True)
+        log_dir.mkdir()
+        (run_dir / "info.json").write_text(
+            json.dumps({"created_at": datetime.now().isoformat(timespec="seconds"), "config": asdict(config)}, indent=2)
+        )
 
-        try:
-            logger.info(f"Preparing training data from {config.dataset_path}")
-            jsonl_path = prepare_training_data(config.dataset_path)
-            logger.info(f"Training data prepared: {jsonl_path}")
-        except Exception as e:
-            logger.error(f"Failed to prepare training data: {e}")
-            raise ValueError(f"Failed to prepare training data: {e}")
-
-        # Build command
-        train_script = Path(__file__).parent / "train_script.py"
+        c = config
         cmd = [
-            sys.executable,
-            str(train_script),
-            "--model_name_or_path",
-            config.model_path,
-            "--dataset_name",
-            "json",
-            "--train_jsonl",
-            jsonl_path,
-            "--text_column_name",
-            "text",
-            "--audio_column_name",
-            "audio",
-            "--output_dir",
-            str(output_dir),
-            "--num_train_epochs",
-            str(config.num_epochs),
-            "--per_device_train_batch_size",
-            str(config.batch_size),
-            "--gradient_accumulation_steps",
-            str(config.gradient_accumulation_steps),
-            "--learning_rate",
-            str(config.learning_rate),
-            "--lora_r",
-            str(config.lora_r),
-            "--lora_alpha",
-            str(config.lora_alpha),
-            "--lora_dropout",
-            str(config.lora_dropout),
-            "--lora_target_modules",
-            config.lora_target_modules,
-            "--save_steps",
-            str(config.save_steps),
-            "--logging_steps",
-            str(config.logging_steps),
-            "--warmup_steps",
-            str(config.warmup_steps),
-            "--warmup_ratio",
-            str(config.warmup_ratio),
-            "--voice_prompt_drop_rate",
-            str(config.voice_prompt_drop_rate),
-            "--lr_scheduler_type",
-            config.lr_scheduler_type,
-            "--max_grad_norm",
-            str(config.max_grad_norm),
-            "--ddpm_batch_mul",
-            str(config.ddpm_batch_mul),
-            "--diffusion_loss_weight",
-            str(config.diffusion_loss_weight),
-            "--ce_loss_weight",
-            str(config.ce_loss_weight),
-            "--logging_dir",
-            str(run_dir / "logs"),
-            "--report_to",
-            "tensorboard",
-            "--remove_unused_columns",
-            "False",
+            str(envs.env_python(spec)), "-m", "vibevoice.finetune.train_vibevoice",
+            "--model_name_or_path", c.model_path,
+            "--dataset_name", "json",
+            "--train_jsonl", jsonl_path,
+            "--text_column_name", "text",
+            "--audio_column_name", "audio",
+            "--output_dir", str(output_dir),
+            "--num_train_epochs", str(c.num_epochs),
+            "--per_device_train_batch_size", str(c.batch_size),
+            "--gradient_accumulation_steps", str(c.gradient_accumulation_steps),
+            "--learning_rate", str(c.learning_rate),
+            "--lora_r", str(c.lora_r),
+            "--lora_alpha", str(c.lora_alpha),
+            "--lora_dropout", str(c.lora_dropout),
+            "--lora_target_modules", c.lora_target_modules,
+            "--save_steps", str(c.save_steps),
+            "--logging_steps", str(c.logging_steps),
+            "--warmup_ratio", str(c.warmup_ratio),
+            "--voice_prompt_drop_rate", str(c.voice_prompt_drop_rate),
+            "--lr_scheduler_type", c.lr_scheduler_type,
+            "--max_grad_norm", str(c.max_grad_norm),
+            "--ddpm_batch_mul", str(c.ddpm_batch_mul),
+            "--diffusion_loss_weight", str(c.diffusion_loss_weight),
+            "--ce_loss_weight", str(c.ce_loss_weight),
+            "--logging_dir", str(log_dir),
+            "--report_to", "tensorboard",
+            "--remove_unused_columns", "False",
             "--do_train",
         ]
-
-        if config.bf16:
+        if c.bf16:
             cmd.append("--bf16")
-        if config.gradient_checkpointing:
+        if c.gradient_checkpointing:
             cmd.append("--gradient_checkpointing")
-        if config.gradient_clipping:
+        if c.gradient_clipping:
             cmd.append("--gradient_clipping")
-        if config.train_diffusion_head:
-            cmd.append("--train_diffusion_head")
-            cmd.append("True")
+        if c.train_diffusion_head:
+            cmd += ["--train_diffusion_head", "True"]
 
-        log_file = run_dir / "train.log"
+        logger.info("Starting training run %s: %s", run_id, " ".join(cmd))
+        popen_kwargs = (
+            {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+        )
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            cwd=str(Path.cwd()),
-            start_new_session=True,
+            cwd=str(run_dir),
+            env=envs.worker_env(),
             text=True,
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
+            **popen_kwargs,
         )
+        (run_dir / "train.pid").write_text(str(process.pid))
+        self._processes[run_id] = process
 
         def tail_logs():
-            """Tail training logs to both file and console"""
-            with open(log_file, "w") as f:
+            with open(run_dir / "train.log", "w", encoding="utf-8") as f:
                 for line in process.stdout:
                     f.write(line)
                     f.flush()
-                    print(line, end="")
+            code = process.wait()
+            info = json.loads((run_dir / "info.json").read_text())
+            info["final_status"] = "finished" if code == 0 else f"failed (exit {code})"
+            (run_dir / "info.json").write_text(json.dumps(info, indent=2))
+            (run_dir / "train.pid").unlink(missing_ok=True)
 
         threading.Thread(target=tail_logs, daemon=True).start()
-        (run_dir / "train.pid").write_text(str(process.pid))
-        logger.info(f"Training process started with PID {process.pid}")
-
-        state = self._load_state()
-        state["active_run"] = run_id
-        self._save_state(state)
-        log_dir = run_dir / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        if self.tensorboard_process is None or self.tensorboard_process.poll() is not None:
-            logger.info("Starting TensorBoard on port 6006")
-            tb_log_file = run_dir / "tensorboard.log"
-            with open(tb_log_file, "w") as tb_log:
-                self.tensorboard_process = subprocess.Popen(
-                    [
-                        "tensorboard",
-                        "--logdir",
-                        str(log_dir),
-                        "--port",
-                        "6006",
-                        "--bind_all",
-                    ],
-                    stdout=tb_log,
-                    stderr=subprocess.STDOUT,
-                )
-            logger.info(f"TensorBoard started with PID {self.tensorboard_process.pid}")
-
-        logger.info(f"Training run {run_id} setup complete")
+        self.ensure_tensorboard()
         return run_id
 
-    def stop_training(self, run_id: Optional[str] = None):
-        """Stop training process with proper cleanup"""
-        if run_id is None:
-            active = self.get_active_run()
-            if not active:
-                logger.warning("No active training run to stop")
-                return
-            run_id = active["run_id"]
-
-        logger.info(f"Stopping training run: {run_id}")
+    def stop_training(self, run_id: str):
         run_dir = self.runs_dir / run_id
         pid_file = run_dir / "train.pid"
-
-        if pid_file.exists():
-            pid = int(pid_file.read_text().strip())
-            logger.info(f"Sending interrupt signals to PID {pid}")
-
-            for attempt in range(3):
+        if not pid_file.exists():
+            return
+        pid = int(pid_file.read_text().strip())
+        logger.info("Stopping training run %s (PID %s)", run_id, pid)
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+        else:
+            # SIGINT lets the HF Trainer stop cleanly; escalate if it doesn't.
+            for sig, wait in ((signal.SIGINT, 10), (signal.SIGTERM, 5), (signal.SIGKILL, 0)):
                 try:
-                    os.kill(pid, signal.SIGINT)
-                    import time
-
-                    time.sleep(2)
-
-                    try:
-                        os.kill(pid, 0)
-                    except OSError:
-                        logger.info(f"Training process {pid} stopped successfully")
-                        break
-
-                    if attempt == 2:
-                        logger.warning(f"Process {pid} did not respond to SIGINT, sending SIGTERM")
-                        os.kill(pid, signal.SIGTERM)
-
+                    os.killpg(pid, sig)
                 except OSError:
-                    logger.info(f"Process {pid} already terminated")
                     break
+                deadline = time.time() + wait
+                while time.time() < deadline and _pid_alive(pid):
+                    time.sleep(0.5)
+                if not _pid_alive(pid):
+                    break
+        pid_file.unlink(missing_ok=True)
 
-            try:
-                pid_file.unlink()
-            except Exception as e:
-                logger.error(f"Failed to remove PID file: {e}")
-
-    def get_tensorboard_url(self, run_id: Optional[str] = None, port: int = 6006) -> str:
-        """Get TensorBoard URL for a run"""
-        if run_id is None:
-            active = self.get_active_run()
-            if not active:
-                return ""
-            run_id = active["run_id"]
-
-        run_dir = self.runs_dir / run_id
-        log_dir = run_dir / "logs"
-
-        if not log_dir.exists():
-            return ""
-
+    def ensure_tensorboard(self) -> str:
         if self.tensorboard_process is None or self.tensorboard_process.poll() is not None:
             self.tensorboard_process = subprocess.Popen(
-                [
-                    "tensorboard",
-                    "--logdir",
-                    str(log_dir),
-                    "--port",
-                    str(port),
-                    "--bind_all",
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                [sys.executable, "-m", "tensorboard.main", "--logdir", str(self.runs_dir),
+                 "--port", str(TENSORBOARD_PORT), "--host", "127.0.0.1"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
+        return f"http://localhost:{TENSORBOARD_PORT}"
 
-        return f"http://localhost:{port}"
-
-    def get_training_log(self, run_id: Optional[str] = None, lines: int = 100) -> str:
-        """Get training log"""
-        if run_id is None:
-            active = self.get_active_run()
-            if not active:
-                return ""
-            run_id = active["run_id"]
-
-        run_dir = self.runs_dir / run_id
-        log_file = run_dir / "train.log"
-
-        if not log_file.exists():
-            return ""
-
-        with open(log_file) as f:
-            all_lines = f.readlines()
-            return "".join(all_lines[-lines:])
-
-    def is_tensorboard_ready(self, run_id: Optional[str] = None) -> bool:
-        """Check if TensorBoard is ready"""
-        import socket
-
+    def is_tensorboard_ready(self) -> bool:
         if self.tensorboard_process is None or self.tensorboard_process.poll() is not None:
             return False
-
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(1)
-            result = sock.connect_ex(("localhost", 6006))
-            sock.close()
-            return result == 0
-        except:
-            return False
+            return sock.connect_ex(("127.0.0.1", TENSORBOARD_PORT)) == 0
+
+    def get_training_log(self, run_id: str, lines: int = 200) -> str:
+        log_file = self.runs_dir / run_id / "train.log"
+        if not log_file.exists():
+            return ""
+        return "".join(log_file.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)[-lines:])
